@@ -1,7 +1,8 @@
 # Qdrant deployment and snapshot hand-off
 
-For the complete server setup, API startup, ingestion, and validation flow,
-see the [Ubuntu deployment runbook](runbook-ubuntu.md).
+For a complete Windows workstation or Ubuntu server setup, API startup,
+ingestion, and validation flow, see the
+[fresh-machine setup runbook](runbook-ubuntu.md).
 
 The repository Compose file runs one pinned Qdrant server with persistent
 storage. Collection snapshots are the fast deployment artifact: a recipient
@@ -9,7 +10,7 @@ restores the already-computed vectors, payloads, and payload indexes instead
 of embedding the media again. Parquet manifests remain the rebuild and audit
 source of truth.
 
-## Start Qdrant on Ubuntu
+## Start Qdrant on a configured machine
 
 From the repository root:
 

@@ -1,7 +1,7 @@
 # Ingestion
 
-Để triển khai toàn bộ backend từ một Ubuntu server mới, xem
-[Ubuntu deployment runbook](runbook-ubuntu.md).
+Để triển khai toàn bộ backend trên Windows workstation hoặc Ubuntu server mới,
+xem [fresh-machine setup runbook](runbook-ubuntu.md).
 
 Internal pipeline for building a new Qdrant collection from a dataset
 version. This is **not** a public upload API — data is copied/mounted onto
@@ -141,8 +141,10 @@ this collection contract.
 
 ## Endpoints
 
-Three endpoints, no more:
+Four endpoints:
 
+- `GET /api/v1/ingestions/feature-profiles` — list the model profiles accepted
+  by ingestion and identify the default profile.
 - `POST /api/v1/ingestions` — create a job.
 - `GET /api/v1/ingestions` — list jobs.
 - `GET /api/v1/ingestions/{job_id}` — read one job's status.
@@ -166,6 +168,7 @@ Validated before a job is accepted:
 - `manifest_path` resolves inside the allowed data root
   (`settings.INGESTION_DATA_ROOT`) — no path escape.
 - `collection_name` isn't already used by another non-failed job.
+- `feature_profile` is registered in `backend/app/features/profiles.py`.
 
 Response (`202 Accepted`):
 
