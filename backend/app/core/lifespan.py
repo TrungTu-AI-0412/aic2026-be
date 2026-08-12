@@ -9,7 +9,6 @@ from app.runtime.container import build_container
 
 @asynccontextmanager
 async def lifespan(application: FastAPI) -> AsyncIterator[None]:
-    settings = settings
     container = await build_container(settings)
 
     application.state.container = container

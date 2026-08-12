@@ -1,13 +1,13 @@
 from fastapi import FastAPI
 
-from app.api.router import api_router
+from app.api.router import router as api_router
 from app.core.lifespan import lifespan
 from app.core.config import settings
 
 def create_app() -> FastAPI:
     application = FastAPI(
-        title=settings.API_TITLE,
-        version=settings.API_VERSION,
+        title=settings.PROJECT_NAME,
+        version=settings.VERSION,
         lifespan=lifespan,
         docs_url="/docs",
         redoc_url="/redoc",

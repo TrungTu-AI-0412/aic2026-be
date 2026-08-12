@@ -40,7 +40,7 @@ class SearchResult(BaseModel):
 class SearchVersions(BaseModel):
     frames_collection: str | None = None
     clips_collection: str | None = None
-    model_config: str
+    model_config_name: str
 
 
 class SearchResponse(BaseModel):
