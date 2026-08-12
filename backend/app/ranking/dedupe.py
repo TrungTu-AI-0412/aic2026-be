@@ -17,8 +17,12 @@ def overfetch_limit(top_k: int, factor: int = DEFAULT_OVERFETCH, cap: int = 1000
     return min(max(top_k, 1) * factor, cap)
 
 
-def dedupe_by_shot(frames: list[ScoredFrame], top_k: int) -> list[ScoredFrame]:
-    """Keep the best-scoring frame per (video, shot), highest score first."""
+def best_per_shot(frames: list[ScoredFrame]) -> dict[tuple[str, int], ScoredFrame]:
+    """Index the best-scoring hit per (video, shot).
+
+    Fusion needs the same collapse keyed by shot, so the mapping lives here
+    rather than being rebuilt next to it.
+    """
     best: dict[tuple[str, int], ScoredFrame] = {}
 
     for frame in frames:
@@ -27,7 +31,14 @@ def dedupe_by_shot(frames: list[ScoredFrame], top_k: int) -> list[ScoredFrame]:
         if current is None or frame.score > current.score:
             best[key] = frame
 
-    ranked = sorted(best.values(), key=lambda frame: frame.score, reverse=True)
+    return best
+
+
+def dedupe_by_shot(frames: list[ScoredFrame], top_k: int) -> list[ScoredFrame]:
+    """Keep the best-scoring frame per (video, shot), highest score first."""
+    ranked = sorted(
+        best_per_shot(frames).values(), key=lambda frame: frame.score, reverse=True
+    )
     return ranked[:top_k]
 
 
