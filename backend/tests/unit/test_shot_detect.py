@@ -99,7 +99,7 @@ class TestDetectShots:
     def test_finds_boundaries_between_solid_segments(self, tmp_path):
         source = write_segmented_video(tmp_path / "L01_V001.mp4", [20, 20, 20])
 
-        shots = shot_detect.detect_shots(probe_row(source))
+        shots = shot_detect.detect_shots(probe_row(source), detector="content")
 
         assert [(shot.start_frame, shot.end_frame) for shot in shots] == [
             (0, 19),
@@ -111,7 +111,7 @@ class TestDetectShots:
     def test_shot_ranges_are_contiguous_and_cover_every_frame(self, tmp_path):
         source = write_segmented_video(tmp_path / "L01_V001.mp4", [20, 25, 18])
 
-        shots = shot_detect.detect_shots(probe_row(source))
+        shots = shot_detect.detect_shots(probe_row(source), detector="content")
 
         assert shots[0].start_frame == 0
         assert shots[-1].end_frame == 62
@@ -121,7 +121,7 @@ class TestDetectShots:
     def test_a_static_video_is_one_shot(self, tmp_path):
         source = write_segmented_video(tmp_path / "L01_V001.mp4", [40])
 
-        shots = shot_detect.detect_shots(probe_row(source))
+        shots = shot_detect.detect_shots(probe_row(source), detector="content")
 
         assert len(shots) == 1
         assert (shots[0].start_frame, shots[0].end_frame) == (0, 39)
@@ -129,7 +129,7 @@ class TestDetectShots:
     def test_timestamps_follow_the_probed_frame_rate(self, tmp_path):
         source = write_segmented_video(tmp_path / "L01_V001.mp4", [20, 20], rate=25)
 
-        shots = shot_detect.detect_shots(probe_row(source))
+        shots = shot_detect.detect_shots(probe_row(source), detector="content")
 
         assert shots[1].start_sec == pytest.approx(0.8)
         assert shots[0].end_sec == pytest.approx(19 / 25)
@@ -137,14 +137,18 @@ class TestDetectShots:
     def test_raising_the_threshold_suppresses_detection(self, tmp_path):
         source = write_segmented_video(tmp_path / "L01_V001.mp4", [20, 20, 20])
 
-        shots = shot_detect.detect_shots(probe_row(source), threshold=250.0)
+        shots = shot_detect.detect_shots(
+            probe_row(source), detector="content", threshold=250.0
+        )
 
         assert len(shots) == 1
 
     def test_min_shot_frames_merges_short_segments(self, tmp_path):
         source = write_segmented_video(tmp_path / "L01_V001.mp4", [20, 5, 20])
 
-        shots = shot_detect.detect_shots(probe_row(source), min_shot_frames=15)
+        shots = shot_detect.detect_shots(
+            probe_row(source), detector="content", min_shot_frames=15
+        )
 
         # The 5-frame segment is below the minimum, so its opening cut is
         # dropped and it stays inside the preceding shot.
@@ -154,7 +158,7 @@ class TestDetectShots:
     def test_shots_point_at_the_source_video(self, tmp_path):
         source = write_segmented_video(tmp_path / "L01_V001.mp4", [20, 20])
 
-        shots = shot_detect.detect_shots(probe_row(source))
+        shots = shot_detect.detect_shots(probe_row(source), detector="content")
 
         assert all(shot.path == str(source) for shot in shots)
 
@@ -179,7 +183,7 @@ class TestDetectShots:
         )
 
         with pytest.raises(shot_detect.ShotDetectionError, match="cannot decode"):
-            shot_detect.detect_shots(row)
+            shot_detect.detect_shots(row, detector="content")
 
 
 class TestBuildShotManifest:
@@ -191,7 +195,9 @@ class TestBuildShotManifest:
         probe.probe_directory(tmp_path / "videos", str(videos_manifest))
 
         out = tmp_path / "shots.parquet"
-        count = shot_detect.build_shot_manifest(str(videos_manifest), str(out))
+        count = shot_detect.build_shot_manifest(
+            str(videos_manifest), str(out), detector="content"
+        )
 
         assert count == 3
         rows = list(iter_rows(str(out), IngestionEntity.CLIPS))
@@ -209,6 +215,7 @@ class TestBuildShotManifest:
         shot_detect.build_shot_manifest(
             str(videos_manifest),
             str(tmp_path / "shots.parquet"),
+            detector="content",
             on_progress=lambda video_id, count: seen.append((video_id, count)),
         )
 
@@ -220,7 +227,7 @@ class TestBuildShotManifest:
 
         with pytest.raises(shot_detect.ShotDetectionError, match="no videos in"):
             shot_detect.build_shot_manifest(
-                str(videos_manifest), str(tmp_path / "shots.parquet")
+                str(videos_manifest), str(tmp_path / "shots.parquet"), detector="content"
             )
 
 
@@ -230,6 +237,6 @@ class TestFrameRateIsPreservedExactly:
             tmp_path / "L01_V001.mp4", [20, 20], rate=Fraction(30000, 1001)
         )
 
-        shots = shot_detect.detect_shots(probe_row(source))
+        shots = shot_detect.detect_shots(probe_row(source), detector="content")
 
         assert shots[1].start_sec == pytest.approx(20 * 1001 / 30000)

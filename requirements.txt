@@ -1,7 +1,9 @@
 fastapi==0.122.0
 uvicorn[standard]==0.44.0
 pydantic==2.13.1
-pyarrow==18.1.0
+# Must stay >=19: pyarrow 18 corrupts torch's DLL load on Windows when it is
+# imported first, which every ingestion entry point does (manifest before model).
+pyarrow==25.0.1
 qdrant-client==1.12.1
 # Video container/metadata probing for ingestion. Wheels bundle FFmpeg, so no
 # system ffmpeg install is required on the competition machine.
@@ -10,5 +12,10 @@ av==18.0.0
 # wheel appropriate for the competition machine when GPU ingestion is used.
 numpy>=2.0,<3
 torch>=2.6,<3
+# Shot boundary detection. Bundles its own weights, so ingestion needs no
+# network access. Pulls ffmpeg-python and pandas transitively; neither is used
+# here, since frames are decoded with PyAV to keep frame indexing authoritative.
+transnetv2-pytorch==1.0.5
 transformers>=4.49,<5
 pillow>=11,<13
+pydantic-settings>=2.6,<3
