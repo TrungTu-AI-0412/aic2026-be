@@ -81,7 +81,9 @@ def iter_difference_scores(
                 raise ShotDetectionError(f"no video stream in {video_path}")
 
             stream = container.streams.video[0]
-            stream.thread_type = "AUTO"
+            # See app/features/media.py: threaded decode deadlocks against
+            # PyAV's GIL-taking log callback on container teardown.
+            stream.thread_type = "NONE"
 
             for index, frame in enumerate(container.decode(stream)):
                 current = frame.reformat(

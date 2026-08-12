@@ -70,7 +70,9 @@ def decode_analysis_frames(video_path: str) -> np.ndarray:
                 raise TransNetInferenceError(f"no video stream in {video_path}")
 
             stream = container.streams.video[0]
-            stream.thread_type = "AUTO"
+            # See app/features/media.py: threaded decode deadlocks against
+            # PyAV's GIL-taking log callback on container teardown.
+            stream.thread_type = "NONE"
 
             decoded = tqdm(
                 container.decode(stream),

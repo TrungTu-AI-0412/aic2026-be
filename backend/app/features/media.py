@@ -63,7 +63,16 @@ def sample_clip_frames(segment: ClipSegment, frame_count: int) -> list[np.ndarra
                 raise FeatureExtractionError(f"no video stream in {segment.path}")
 
             stream = container.streams.video[0]
-            stream.thread_type = "AUTO"
+            # Single-threaded on purpose. PyAV forwards FFmpeg logs into Python
+            # logging from whatever thread emits them, taking the GIL to do it,
+            # and `transformers` reinstalls that callback when it is imported.
+            # With frame threading, a decoder worker logging (these h264
+            # sources spam "mmco: unref short failure") blocks on the GIL while
+            # the main thread already holds it inside avcodec_free_context()
+            # waiting for that same worker to exit: both hang forever, which is
+            # how a clips ingestion stalled in `upserting`. Threading buys
+            # roughly 1.5x on decode and is not worth a deadlock.
+            stream.thread_type = "NONE"
             if segment.start_sec > 0 and stream.time_base is not None:
                 offset = max(0, int(segment.start_sec / float(stream.time_base)))
                 container.seek(offset, stream=stream, backward=True)
