@@ -18,5 +18,10 @@ class Settings(BaseSettings):
 
     QDRANT_URL: str = "http://localhost:6333"
     QDRANT_API_KEY: Optional[str] = None
+    QDRANT_COLLECTION_NAME: str = "aic2026"
+    QDRANT_BATCH_SIZE: int = 256
+    
+    # QDRANT_VECTOR_SIZE: int = 1048
+    
 
 settings = Settings()

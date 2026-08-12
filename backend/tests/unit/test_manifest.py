@@ -1,0 +1,188 @@
+from fractions import Fraction
+
+import pyarrow.parquet as pq
+import pytest
+from pydantic import ValidationError
+
+from app.ingestion import manifest
+from app.schemas.ingestions import IngestionEntity
+
+
+def _keyframe(**overrides) -> manifest.KeyframeManifestRow:
+    values = {
+        "video_id": "L01_V001",
+        "shot_id": 3,
+        "original_frame_id": 415,
+        "pts_sec": 16.6,
+        "path": "/data/keyframes/L01_V001/000415.jpg",
+    }
+    return manifest.KeyframeManifestRow(**{**values, **overrides})
+
+
+def _clip(**overrides) -> manifest.ClipManifestRow:
+    values = {
+        "video_id": "L01_V001",
+        "shot_id": 3,
+        "start_frame": 400,
+        "end_frame": 430,
+        "start_sec": 16.0,
+        "end_sec": 17.2,
+        "path": "/data/videos/L01_V001.mp4",
+    }
+    return manifest.ClipManifestRow(**{**values, **overrides})
+
+
+def _video(**overrides) -> manifest.VideoManifestRow:
+    values = {
+        "video_id": "L01_V001",
+        "path": "/data/videos/L01_V001.mp4",
+        "fps_num": 30000,
+        "fps_den": 1001,
+        "nb_frames": 54321,
+        "duration_sec": 1812.9,
+        "width": 1280,
+        "height": 720,
+        "rotation": 0,
+        "is_vfr": False,
+        "codec": "h264",
+    }
+    return manifest.VideoManifestRow(**{**values, **overrides})
+
+
+class TestKeyframeRowMapping:
+    def test_point_parts_use_original_frame_id(self):
+        assert _keyframe().point_parts() == ("L01_V001", "415")
+
+    def test_payload_carries_shot_id_for_scene_dedupe(self):
+        payload = _keyframe().payload()
+        assert payload == {
+            "video_id": "L01_V001",
+            "shot_id": 3,
+            "original_frame_id": 415,
+            "pts_sec": 16.6,
+            "path": "/data/keyframes/L01_V001/000415.jpg",
+        }
+
+    def test_negative_original_frame_id_is_rejected(self):
+        with pytest.raises(ValidationError):
+            _keyframe(original_frame_id=-1)
+
+
+class TestClipRowMapping:
+    def test_point_parts_are_namespaced_by_shot(self):
+        assert _clip().point_parts() == ("L01_V001", "shot3")
+
+    def test_payload_carries_inclusive_frame_range(self):
+        payload = _clip().payload()
+        assert payload["start_frame"] == 400
+        assert payload["end_frame"] == 430
+        assert payload["path"] == "/data/videos/L01_V001.mp4"
+
+    def test_single_frame_shot_is_valid_because_end_is_inclusive(self):
+        row = _clip(start_frame=400, end_frame=400, start_sec=16.0, end_sec=16.0)
+        assert row.start_frame == row.end_frame
+
+    def test_reversed_frame_range_is_rejected(self):
+        with pytest.raises(ValidationError, match="precedes start_frame"):
+            _clip(start_frame=430, end_frame=400)
+
+    def test_reversed_time_range_is_rejected(self):
+        with pytest.raises(ValidationError, match="precedes start_sec"):
+            _clip(start_sec=17.2, end_sec=16.0)
+
+
+class TestVideoRowFrameRateMapping:
+    def test_fps_stays_an_exact_fraction(self):
+        assert _video().fps == Fraction(30000, 1001)
+
+    def test_frame_to_sec_and_back_is_lossless_on_ntsc_rates(self):
+        video = _video()
+        # 29.97 rounded to float drifts by whole frames over a long video;
+        # the fractional rate must survive the round trip exactly.
+        for frame_id in (0, 1, 1500, 54320):
+            assert video.sec_to_frame(video.frame_to_sec(frame_id)) == frame_id
+
+    def test_integer_frame_rate_round_trip(self):
+        video = _video(fps_num=25, fps_den=1)
+        assert video.frame_to_sec(50) == pytest.approx(2.0)
+        assert video.sec_to_frame(2.0) == 50
+
+    def test_nb_frames_is_optional_because_containers_may_omit_it(self):
+        assert _video(nb_frames=None).nb_frames is None
+
+    def test_unsupported_rotation_is_rejected(self):
+        with pytest.raises(ValidationError):
+            _video(rotation=45)
+
+    def test_zero_frame_rate_denominator_is_rejected(self):
+        with pytest.raises(ValidationError):
+            _video(fps_den=0)
+
+
+class TestParquetRoundTrip:
+    def test_keyframe_manifest_round_trip(self, tmp_path):
+        out = tmp_path / "keyframes.parquet"
+        rows = [_keyframe(original_frame_id=i, shot_id=i // 2) for i in range(5)]
+
+        written = manifest.write_rows(
+            rows, str(out), manifest.KEYFRAME_ARROW_SCHEMA
+        )
+        assert written == 5
+
+        manifest.validate_columns(str(out), IngestionEntity.FRAMES)
+        assert manifest.count_rows(str(out)) == 5
+
+        read_back = list(manifest.iter_rows(str(out), IngestionEntity.FRAMES))
+        assert all(isinstance(row, manifest.KeyframeManifestRow) for row in read_back)
+        assert [row.original_frame_id for row in read_back] == [0, 1, 2, 3, 4]
+
+    def test_clip_manifest_round_trip(self, tmp_path):
+        out = tmp_path / "shots.parquet"
+        rows = [_clip(shot_id=i, start_frame=i * 30, end_frame=i * 30 + 29) for i in range(4)]
+
+        manifest.write_rows(rows, str(out), manifest.CLIP_ARROW_SCHEMA)
+        manifest.validate_columns(str(out), IngestionEntity.CLIPS)
+
+        read_back = list(manifest.iter_rows(str(out), IngestionEntity.CLIPS))
+        assert all(isinstance(row, manifest.ClipManifestRow) for row in read_back)
+        assert [row.shot_id for row in read_back] == [0, 1, 2, 3]
+
+    def test_video_manifest_round_trip(self, tmp_path):
+        out = tmp_path / "videos.parquet"
+        manifest.write_rows([_video()], str(out), manifest.VIDEO_ARROW_SCHEMA)
+
+        manifest.validate_video_columns(str(out))
+        read_back = list(manifest.iter_video_rows(str(out)))
+        assert read_back[0].fps == Fraction(30000, 1001)
+        assert read_back[0].codec == "h264"
+
+    def test_all_null_nb_frames_keeps_its_declared_type(self, tmp_path):
+        out = tmp_path / "videos.parquet"
+        manifest.write_rows(
+            [_video(nb_frames=None)], str(out), manifest.VIDEO_ARROW_SCHEMA
+        )
+
+        # Without an explicit schema pyarrow would infer `null` here and the
+        # column would no longer round-trip as an integer.
+        schema = pq.ParquetFile(str(out)).schema_arrow
+        assert schema.field("nb_frames").type == manifest.VIDEO_ARROW_SCHEMA.field(
+            "nb_frames"
+        ).type
+        assert list(manifest.iter_video_rows(str(out)))[0].nb_frames is None
+
+
+class TestColumnValidation:
+    def test_missing_columns_are_reported(self, tmp_path):
+        out = tmp_path / "keyframes.parquet"
+        manifest.write_rows([_keyframe()], str(out), manifest.KEYFRAME_ARROW_SCHEMA)
+
+        with pytest.raises(ValueError, match="missing required columns"):
+            manifest.validate_columns(str(out), IngestionEntity.CLIPS)
+
+    def test_entities_declare_distinct_required_columns(self):
+        frames = manifest.REQUIRED_COLUMNS[IngestionEntity.FRAMES]
+        clips = manifest.REQUIRED_COLUMNS[IngestionEntity.CLIPS]
+
+        assert "original_frame_id" in frames
+        assert "original_frame_id" not in clips
+        assert {"video_id", "shot_id", "path"} <= frames & clips

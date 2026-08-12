@@ -57,7 +57,7 @@ API at this stage — those are follow-ups once there is a real need for them.
   "entity": "frames",
   "manifest_path": "/data/manifests/batch1-frames.parquet",
   "collection_name": "aic_frames_r001",
-  "feature_profile": "clip-b32-v1"
+  "feature_profile": "siglip2-giant-opt-patch16-384-v1"
 }
 ```
 
@@ -128,10 +128,13 @@ GET /api/v1/ingestions/{job_id} just reads that SQLite row
   runner's stage-by-stage state transitions are real and wired
   end-to-end — `validate_manifest` and the row-iteration side of
   `upsert_points` genuinely read the Parquet manifest.
-- The actual feature-extraction and Qdrant-upsert work (the
-  `_embed_and_upsert` call inside `app/ingestion/pipeline.py`, plus
-  `create_collection`/`create_payload_indexes`/`optimize_collection`) is
-  stubbed with `NotImplementedError` — that depends on the embedding
-  model and the `vector_store/` client, which don't exist yet. Wiring
-  those in is the next step; the runner already calls everything in the
-  right order and persists whatever progress they report.
+- Feature extraction and Qdrant upsert are implemented. The highest-capacity
+  profile `siglip2-giant-opt-patch16-384-v1` uses the multilingual SigLIP 2
+  Giant checkpoint. Keyframes are embedded directly; clips are represented by
+  up to eight uniformly sampled frames, normalized and mean-pooled in the same
+  vector space used by `pipeline.embed_text`. The So400m and CLIP B/32 profiles
+  remain available when ingestion memory is constrained.
+- Model weights must be downloaded into the local Hugging Face cache before
+  an offline competition run. The SigLIP 2 Giant checkpoint is roughly 7.5 GB,
+  and GPU inference is strongly recommended.
+- Collection optimization is still a deliberate `NotImplementedError`.
