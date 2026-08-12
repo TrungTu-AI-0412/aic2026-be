@@ -1,0 +1,1084 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "AIC 2026 Retrieval System",
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/api/v1/health/live": {
+      "get": {
+        "tags": [
+          "Health"
+        ],
+        "summary": "Liveness",
+        "operationId": "liveness_api_v1_health_live_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "type": "object",
+                  "title": "Response Liveness Api V1 Health Live Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/health/ready": {
+      "get": {
+        "tags": [
+          "Health"
+        ],
+        "summary": "Readiness",
+        "operationId": "readiness_api_v1_health_ready_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "type": "object",
+                  "title": "Response Readiness Api V1 Health Ready Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/search/kis": {
+      "post": {
+        "tags": [
+          "Search"
+        ],
+        "summary": "Search Kis",
+        "operationId": "search_kis_api_v1_search_kis_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/KisSearchRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SearchResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/search/qa": {
+      "post": {
+        "tags": [
+          "Search"
+        ],
+        "summary": "Search Qa",
+        "operationId": "search_qa_api_v1_search_qa_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/QaSearchRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SearchResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/search/trake": {
+      "post": {
+        "tags": [
+          "Search"
+        ],
+        "summary": "Search Trake",
+        "operationId": "search_trake_api_v1_search_trake_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TrakeSearchRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SearchResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/videos/{video_id}/frames/{frame_id}": {
+      "get": {
+        "tags": [
+          "Media"
+        ],
+        "summary": "Get Frame",
+        "operationId": "get_frame_api_v1_videos__video_id__frames__frame_id__get",
+        "parameters": [
+          {
+            "name": "video_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Video Id"
+            }
+          },
+          {
+            "name": "frame_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Frame Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/videos/{video_id}/clip": {
+      "get": {
+        "tags": [
+          "Media"
+        ],
+        "summary": "Get Clip",
+        "operationId": "get_clip_api_v1_videos__video_id__clip_get",
+        "parameters": [
+          {
+            "name": "video_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Video Id"
+            }
+          },
+          {
+            "name": "start_frame",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Start Frame"
+            }
+          },
+          {
+            "name": "end_frame",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "End Frame"
+            }
+          },
+          {
+            "name": "center_frame",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Center Frame"
+            }
+          },
+          {
+            "name": "radius",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Radius"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/submissions/export": {
+      "post": {
+        "tags": [
+          "Submissions"
+        ],
+        "summary": "Export Submission",
+        "operationId": "export_submission_api_v1_submissions_export_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExportRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/ingestions": {
+      "get": {
+        "tags": [
+          "Ingestion"
+        ],
+        "summary": "List Ingestion Jobs",
+        "operationId": "list_ingestion_jobs_api_v1_ingestions_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IngestionJobListResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Ingestion"
+        ],
+        "summary": "Create Ingestion Job",
+        "operationId": "create_ingestion_job_api_v1_ingestions_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateIngestionJobRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateIngestionJobResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/ingestions/{job_id}": {
+      "get": {
+        "tags": [
+          "Ingestion"
+        ],
+        "summary": "Get Ingestion Job",
+        "operationId": "get_ingestion_job_api_v1_ingestions__job_id__get",
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Job Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IngestionJobStatusResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "CreateIngestionJobRequest": {
+        "properties": {
+          "entity": {
+            "$ref": "#/components/schemas/IngestionEntity"
+          },
+          "manifest_path": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Manifest Path"
+          },
+          "collection_name": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Collection Name"
+          },
+          "feature_profile": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Feature Profile"
+          }
+        },
+        "type": "object",
+        "required": [
+          "entity",
+          "manifest_path",
+          "collection_name",
+          "feature_profile"
+        ],
+        "title": "CreateIngestionJobRequest"
+      },
+      "CreateIngestionJobResponse": {
+        "properties": {
+          "job_id": {
+            "type": "string",
+            "title": "Job Id"
+          },
+          "status": {
+            "$ref": "#/components/schemas/IngestionStatus",
+            "default": "queued"
+          },
+          "collection_name": {
+            "type": "string",
+            "title": "Collection Name"
+          }
+        },
+        "type": "object",
+        "required": [
+          "job_id",
+          "collection_name"
+        ],
+        "title": "CreateIngestionJobResponse"
+      },
+      "ExportFormat": {
+        "type": "string",
+        "enum": [
+          "csv",
+          "json"
+        ],
+        "title": "ExportFormat"
+      },
+      "ExportRequest": {
+        "properties": {
+          "task": {
+            "type": "string",
+            "enum": [
+              "kis",
+              "qa",
+              "trake"
+            ],
+            "title": "Task"
+          },
+          "format": {
+            "$ref": "#/components/schemas/ExportFormat",
+            "default": "csv"
+          },
+          "event_slot_count": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Event Slot Count"
+          },
+          "candidates": {
+            "items": {
+              "oneOf": [
+                {
+                  "$ref": "#/components/schemas/KisCandidate"
+                },
+                {
+                  "$ref": "#/components/schemas/QaCandidate"
+                },
+                {
+                  "$ref": "#/components/schemas/TrakeCandidate"
+                }
+              ],
+              "discriminator": {
+                "propertyName": "task",
+                "mapping": {
+                  "kis": "#/components/schemas/KisCandidate",
+                  "qa": "#/components/schemas/QaCandidate",
+                  "trake": "#/components/schemas/TrakeCandidate"
+                }
+              }
+            },
+            "type": "array",
+            "maxItems": 100,
+            "minItems": 1,
+            "title": "Candidates"
+          }
+        },
+        "type": "object",
+        "required": [
+          "task",
+          "candidates"
+        ],
+        "title": "ExportRequest"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "IngestionEntity": {
+        "type": "string",
+        "enum": [
+          "frames",
+          "clips"
+        ],
+        "title": "IngestionEntity"
+      },
+      "IngestionJobListResponse": {
+        "properties": {
+          "jobs": {
+            "items": {
+              "$ref": "#/components/schemas/IngestionJobStatusResponse"
+            },
+            "type": "array",
+            "title": "Jobs"
+          }
+        },
+        "type": "object",
+        "required": [
+          "jobs"
+        ],
+        "title": "IngestionJobListResponse"
+      },
+      "IngestionJobStatusResponse": {
+        "properties": {
+          "job_id": {
+            "type": "string",
+            "title": "Job Id"
+          },
+          "status": {
+            "$ref": "#/components/schemas/IngestionStatus"
+          },
+          "stage": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/IngestionStage"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "progress": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/IngestionProgress"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "collection_name": {
+            "type": "string",
+            "title": "Collection Name"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          }
+        },
+        "type": "object",
+        "required": [
+          "job_id",
+          "status",
+          "collection_name"
+        ],
+        "title": "IngestionJobStatusResponse"
+      },
+      "IngestionProgress": {
+        "properties": {
+          "completed": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Completed"
+          },
+          "total": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Total"
+          },
+          "percent": {
+            "type": "number",
+            "maximum": 100.0,
+            "minimum": 0.0,
+            "title": "Percent"
+          }
+        },
+        "type": "object",
+        "required": [
+          "completed",
+          "total",
+          "percent"
+        ],
+        "title": "IngestionProgress"
+      },
+      "IngestionStage": {
+        "type": "string",
+        "enum": [
+          "validating",
+          "creating_collection",
+          "creating_payload_indexes",
+          "upserting",
+          "optimizing",
+          "completed"
+        ],
+        "title": "IngestionStage"
+      },
+      "IngestionStatus": {
+        "type": "string",
+        "enum": [
+          "queued",
+          "running",
+          "succeeded",
+          "failed"
+        ],
+        "title": "IngestionStatus"
+      },
+      "KisCandidate": {
+        "properties": {
+          "task": {
+            "type": "string",
+            "const": "kis",
+            "title": "Task"
+          },
+          "video_id": {
+            "type": "string",
+            "pattern": "^L\\d{2}_V\\d{3}$",
+            "title": "Video Id"
+          },
+          "frame_id": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Frame Id"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "task",
+          "video_id",
+          "frame_id"
+        ],
+        "title": "KisCandidate"
+      },
+      "KisSearchRequest": {
+        "properties": {
+          "task": {
+            "type": "string",
+            "const": "kis",
+            "title": "Task"
+          },
+          "description": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Description"
+          },
+          "top_k": {
+            "type": "integer",
+            "maximum": 100.0,
+            "minimum": 1.0,
+            "title": "Top K",
+            "default": 100
+          }
+        },
+        "type": "object",
+        "required": [
+          "task",
+          "description"
+        ],
+        "title": "KisSearchRequest"
+      },
+      "QaCandidate": {
+        "properties": {
+          "task": {
+            "type": "string",
+            "const": "qa",
+            "title": "Task"
+          },
+          "video_id": {
+            "type": "string",
+            "pattern": "^L\\d{2}_V\\d{3}$",
+            "title": "Video Id"
+          },
+          "frame_id": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Frame Id"
+          },
+          "answer": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Answer"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "task",
+          "video_id",
+          "frame_id",
+          "answer"
+        ],
+        "title": "QaCandidate"
+      },
+      "QaSearchRequest": {
+        "properties": {
+          "task": {
+            "type": "string",
+            "const": "qa",
+            "title": "Task"
+          },
+          "description": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Description"
+          },
+          "question": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Question"
+          },
+          "top_k": {
+            "type": "integer",
+            "maximum": 100.0,
+            "minimum": 1.0,
+            "title": "Top K",
+            "default": 100
+          }
+        },
+        "type": "object",
+        "required": [
+          "task",
+          "description",
+          "question"
+        ],
+        "title": "QaSearchRequest"
+      },
+      "SearchResponse": {
+        "properties": {
+          "request_id": {
+            "type": "string",
+            "title": "Request Id"
+          },
+          "task": {
+            "type": "string",
+            "enum": [
+              "kis",
+              "qa",
+              "trake"
+            ],
+            "title": "Task"
+          },
+          "results": {
+            "items": {
+              "$ref": "#/components/schemas/SearchResult"
+            },
+            "type": "array",
+            "title": "Results"
+          },
+          "versions": {
+            "$ref": "#/components/schemas/SearchVersions"
+          },
+          "latency_ms": {
+            "additionalProperties": {
+              "type": "number"
+            },
+            "type": "object",
+            "title": "Latency Ms"
+          }
+        },
+        "type": "object",
+        "required": [
+          "request_id",
+          "task",
+          "results",
+          "versions",
+          "latency_ms"
+        ],
+        "title": "SearchResponse"
+      },
+      "SearchResult": {
+        "properties": {
+          "rank": {
+            "type": "integer",
+            "title": "Rank"
+          },
+          "video_id": {
+            "type": "string",
+            "title": "Video Id"
+          },
+          "frame_ids": {
+            "items": {
+              "type": "integer"
+            },
+            "type": "array",
+            "title": "Frame Ids"
+          },
+          "answer": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Answer"
+          },
+          "score": {
+            "type": "number",
+            "title": "Score"
+          }
+        },
+        "type": "object",
+        "required": [
+          "rank",
+          "video_id",
+          "frame_ids",
+          "score"
+        ],
+        "title": "SearchResult"
+      },
+      "SearchVersions": {
+        "properties": {
+          "frames_collection": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Frames Collection"
+          },
+          "clips_collection": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Clips Collection"
+          },
+          "model_config_name": {
+            "type": "string",
+            "title": "Model Config Name"
+          }
+        },
+        "type": "object",
+        "required": [
+          "model_config_name"
+        ],
+        "title": "SearchVersions"
+      },
+      "TrakeCandidate": {
+        "properties": {
+          "task": {
+            "type": "string",
+            "const": "trake",
+            "title": "Task"
+          },
+          "video_id": {
+            "type": "string",
+            "pattern": "^L\\d{2}_V\\d{3}$",
+            "title": "Video Id"
+          },
+          "event_frame_ids": {
+            "items": {
+              "type": "integer"
+            },
+            "type": "array",
+            "minItems": 1,
+            "title": "Event Frame Ids"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "task",
+          "video_id",
+          "event_frame_ids"
+        ],
+        "title": "TrakeCandidate"
+      },
+      "TrakeSearchRequest": {
+        "properties": {
+          "task": {
+            "type": "string",
+            "const": "trake",
+            "title": "Task"
+          },
+          "overview": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Overview"
+          },
+          "events": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "minItems": 1,
+            "title": "Events"
+          },
+          "top_k": {
+            "type": "integer",
+            "maximum": 100.0,
+            "minimum": 1.0,
+            "title": "Top K",
+            "default": 100
+          }
+        },
+        "type": "object",
+        "required": [
+          "task",
+          "overview",
+          "events"
+        ],
+        "title": "TrakeSearchRequest"
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      }
+    }
+  }
+}
