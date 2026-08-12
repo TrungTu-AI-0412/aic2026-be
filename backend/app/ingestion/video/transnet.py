@@ -17,6 +17,7 @@ from typing import Any
 
 import av
 import numpy as np
+from tqdm import tqdm
 
 # TransNetV2 was trained on 48x27 RGB frames; the input size is fixed.
 INPUT_WIDTH = 48
@@ -71,7 +72,14 @@ def decode_analysis_frames(video_path: str) -> np.ndarray:
             stream = container.streams.video[0]
             stream.thread_type = "AUTO"
 
-            for frame in container.decode(stream):
+            decoded = tqdm(
+                container.decode(stream),
+                total=stream.frames or None,
+                desc="decode",
+                unit="frame",
+                leave=False,
+            )
+            for frame in decoded:
                 frames.append(
                     frame.reformat(
                         width=INPUT_WIDTH, height=INPUT_HEIGHT, format="rgb24"
@@ -93,7 +101,7 @@ def predict_transition_scores(video_path: str) -> np.ndarray:
 
     with torch.no_grad():
         single_frame_pred, _ = model.predict_frames(
-            torch.from_numpy(frames), quiet=True
+            torch.from_numpy(frames).to(model.device), quiet=True
         )
 
     scores = single_frame_pred.cpu().numpy().reshape(-1)

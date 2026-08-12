@@ -23,11 +23,13 @@ from pathlib import Path
 
 import av
 import numpy as np
+from tqdm import tqdm
 
 from app.ingestion.manifest import (
     CLIP_ARROW_SCHEMA,
     ClipManifestRow,
     VideoManifestRow,
+    existing_video_ids,
     iter_video_rows,
     write_rows,
 )
@@ -177,19 +179,38 @@ def build_shot_manifest(
     threshold: float | None = None,
     min_shot_frames: int = DEFAULT_MIN_SHOT_FRAMES,
     on_progress=None,
+    resume: bool = False,
+    limit: int | None = None,
 ) -> int:
+    """Detect shots for every video in the probe manifest.
+
+    With `resume`, videos that already have shots in `out_path` are skipped and
+    the new ones appended - the expensive detector never re-runs over a video a
+    previous slice covered. `limit` caps how many *new* videos this run takes.
+    """
     rows: list[ClipManifestRow] = []
 
-    for video in iter_video_rows(videos_manifest):
+    # Materialised so the progress bar knows how many videos are coming; the
+    # rows are metadata only, a few hundred bytes each.
+    videos = list(iter_video_rows(videos_manifest))
+    if not videos:
+        raise ShotDetectionError(f"no videos in '{videos_manifest}'")
+
+    done = existing_video_ids(out_path) if resume else set()
+    pending = [video for video in videos if video.video_id not in done][:limit]
+    bar = tqdm(pending, desc="shot detection", unit="video")
+
+    for video in bar:
+        bar.set_postfix_str(video.video_id, refresh=False)
         shots = detect_shots(video, detector, threshold, min_shot_frames)
         rows.extend(shots)
         if on_progress is not None:
             on_progress(video.video_id, len(shots))
 
-    if not rows:
-        raise ShotDetectionError(f"no videos in '{videos_manifest}'")
-
-    return write_rows(rows, out_path, CLIP_ARROW_SCHEMA)
+    # ponytail: the manifest is written once, at the end, so a crashed run
+    # loses its own videos and re-does them. Flush per video if runs get long
+    # enough for that to hurt.
+    return write_rows(rows, out_path, CLIP_ARROW_SCHEMA, append=resume)
 
 
 def main() -> None:
@@ -220,13 +241,24 @@ def main() -> None:
         default=DEFAULT_MIN_SHOT_FRAMES,
         help=f"shortest allowed shot (default {DEFAULT_MIN_SHOT_FRAMES})",
     )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="skip videos already in --out and append the rest",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="detect at most this many new videos, for a trial slice",
+    )
     args = parser.parse_args()
 
     if not Path(args.videos_manifest).is_file():
         raise SystemExit(f"probe manifest not found: {args.videos_manifest}")
 
     def report(video_id: str, shot_count: int) -> None:
-        print(f"{video_id}: {shot_count} shots")
+        tqdm.write(f"{video_id}: {shot_count} shots")
 
     count = build_shot_manifest(
         args.videos_manifest,
@@ -235,8 +267,10 @@ def main() -> None:
         threshold=args.threshold,
         min_shot_frames=args.min_shot_frames,
         on_progress=report,
+        resume=args.resume,
+        limit=args.limit,
     )
-    print(f"wrote {count} shots to {args.out}")
+    print(f"clips manifest now holds {count} shots: {args.out}")
 
 
 if __name__ == "__main__":

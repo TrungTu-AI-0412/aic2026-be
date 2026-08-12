@@ -18,10 +18,12 @@ from pathlib import Path
 
 import av
 from av.sidedata.sidedata import Type as SideDataType
+from tqdm import tqdm
 
 from app.ingestion.manifest import (
     VIDEO_ARROW_SCHEMA,
     VideoManifestRow,
+    existing_video_ids,
     write_rows,
 )
 
@@ -71,7 +73,19 @@ def probe_video(path: str | Path, video_id: str | None = None) -> VideoManifestR
         raise VideoProbeError(f"cannot probe {source}: {exc}") from exc
 
 
-def probe_directory(source_dir: str | Path, out_path: str) -> int:
+def probe_directory(
+    source_dir: str | Path,
+    out_path: str,
+    resume: bool = False,
+    limit: int | None = None,
+) -> int:
+    """Probe every video under `source_dir` into a manifest.
+
+    With `resume`, videos already listed in `out_path` are skipped and the new
+    rows are appended, so growing the run from a handful of videos to the whole
+    dataset never re-probes what is already recorded. `limit` caps how many
+    *new* videos this run takes, which is how a small trial slice is made.
+    """
     source = Path(source_dir)
     if not source.is_dir():
         raise VideoProbeError(f"source directory not found: {source}")
@@ -84,8 +98,14 @@ def probe_directory(source_dir: str | Path, out_path: str) -> int:
     if not videos:
         raise VideoProbeError(f"no video files found under '{source}'")
 
-    rows = [probe_video(path) for path in videos]
-    return write_rows(rows, out_path, VIDEO_ARROW_SCHEMA)
+    done = existing_video_ids(out_path) if resume else set()
+    pending = [path for path in videos if path.stem not in done][:limit]
+
+    rows = [
+        probe_video(path)
+        for path in tqdm(pending, desc="probe", unit="video")
+    ]
+    return write_rows(rows, out_path, VIDEO_ARROW_SCHEMA, append=resume)
 
 
 def _is_vfr(stream) -> bool:
@@ -157,10 +177,21 @@ def main() -> None:
     )
     parser.add_argument("--source", required=True, help="directory of source videos")
     parser.add_argument("--out", required=True, help="output videos .parquet path")
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="skip videos already in --out and append the rest",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="probe at most this many new videos, for a trial slice",
+    )
     args = parser.parse_args()
 
-    count = probe_directory(args.source, args.out)
-    print(f"probed {count} videos into {args.out}")
+    count = probe_directory(args.source, args.out, args.resume, args.limit)
+    print(f"videos.parquet now holds {count} videos: {args.out}")
 
 
 if __name__ == "__main__":
