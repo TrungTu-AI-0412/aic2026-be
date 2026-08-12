@@ -1,127 +1,265 @@
-# Runbook triển khai AIC 2026 Retrieval Backend trên Ubuntu
+# Runbook thiết lập máy mới và vận hành AIC 2026
 
-Tài liệu này mô tả cách chạy repository backend từ đầu, bao gồm:
+Tài liệu này hướng dẫn dựng retrieval backend từ một máy mới, không chỉ Ubuntu
+server. Tên file `runbook-ubuntu.md` được giữ để không làm hỏng các liên kết cũ.
 
-- cài môi trường Python và GPU;
-- khởi động Qdrant bằng Docker Compose;
-- chạy FastAPI;
-- tạo Parquet manifests từ video;
-- ingest keyframes và clips vào Qdrant;
-- tìm kiếm thử;
-- xuất và restore snapshot để máy khác không phải embed lại;
-- chạy API lâu dài bằng systemd.
+Hai môi trường được hỗ trợ trong runbook:
 
-Phạm vi của tài liệu là repository retrieval backend này, không bao gồm
-competition console/frontend.
+- **Windows 11 workstation**: development, preprocessing, ingestion và demo.
+- **Ubuntu 24.04/22.04 server**: deployment ổn định, chạy lâu dài bằng systemd.
 
-## 1. Kiến trúc khi chạy
+Các phần dùng chung bao gồm Qdrant, model cache, restore snapshot, build manifest,
+ingestion, activate collection, search validation và troubleshooting.
+
+## 1. Kết quả cuối cùng
+
+Sau khi hoàn tất, máy có:
 
 ```text
-Source videos / keyframes
-          |
-          v
-Probe -> shot detection -> keyframe sampling -> Parquet manifests
-                                                   |
-                                                   v
-FastAPI ingestion endpoint -> detached runner -> embedding model
-                                                   |
-                                                   v
-                                                Qdrant
-                                                   ^
-                                                   |
-Text query -> cùng embedding profile -> cosine search -> ranking -> API response
+Qdrant v1.12.1       http://127.0.0.1:6333
+FastAPI backend      http://127.0.0.1:8000
+Swagger UI           http://127.0.0.1:8000/docs
+Optional frontend    http://127.0.0.1:5173
 ```
 
-Hai loại collection được xây riêng:
+Luồng dữ liệu:
 
-- `frames`: mỗi point đại diện cho một keyframe;
-- `clips`: mỗi point đại diện cho một shot/clip và được tạo từ tối đa tám
-  frame lấy mẫu trong shot.
+```text
+Source videos
+    │
+    ├─ probe → shot detection → keyframe sampling → Parquet manifests
+    │                                                   │
+    │                                                   ▼
+    └────────────────────────────────────── detached ingestion runner
+                                                        │
+                                              image/clip embedding
+                                                        │
+                                                        ▼
+Text query → matching text encoder ─────────────────→ Qdrant
+                                                        │
+                                                        ▼
+                                              dedupe/rank → API
+```
 
-Hiện tại retrieval path tìm kiếm trên collection `frames`. Collection
-`clips` đã có thể ingest và snapshot nhưng chưa được fusion vào search path.
+Hai collection được tạo độc lập:
 
-## 2. Yêu cầu máy chủ
+- `frames`: một point cho mỗi sampled keyframe;
+- `clips`: một point cho mỗi shot, pooling tối đa tám sampled frames.
 
-Khuyến nghị:
+Query path hiện dùng frame collection. Clip collection có thể ingest/snapshot
+nhưng chưa được fusion vào search ranking.
 
-- Ubuntu 22.04 hoặc 24.04;
-- Python 3.12;
-- Docker Engine và Docker Compose v2;
-- NVIDIA driver hoạt động nếu chạy ingestion bằng GPU;
-- đủ dung lượng cho source video, extracted keyframes, Hugging Face cache,
-  Qdrant storage và snapshot.
+## 2. Chọn đường triển khai
 
-Code hiện tại sử dụng cú pháp generic của Python 3.12, vì vậy không nên chạy
-bằng Python 3.10 hoặc 3.11.
+Có hai đường để máy có collection:
 
-Kiểm tra các công cụ:
+1. **Restore snapshot** — nhanh nhất, không embed lại; dùng cho máy thi/máy nhận release.
+2. **Ingest từ source** — dùng khi dataset, sampling hoặc model thay đổi.
 
-```bash
-python3.12 --version
+Nếu đã có release gồm `.snapshot` và `snapshot-manifest.json`, setup Qdrant,
+Python và model cache rồi chuyển tới [mục 10](#10-restore-snapshot-không-embed-lại).
+
+Nếu cần build mới, làm tiếp [mục 11](#11-build-manifest-và-ingest-từ-source).
+
+## 3. Yêu cầu phần cứng và phần mềm
+
+### Bắt buộc
+
+- CPU x86-64 hoặc ARM64 được Docker/PyTorch hỗ trợ;
+- Python **3.12**;
+- Git;
+- Docker Engine + Compose v2, hoặc Docker Desktop;
+- đủ disk cho video, keyframes, model cache, Qdrant storage và snapshot.
+
+Code dùng cú pháp Python 3.12, không hỗ trợ Python 3.10/3.11.
+
+### GPU
+
+NVIDIA GPU được khuyến nghị mạnh cho ingestion và query encoding bằng SigLIP.
+Backend Python chạy trực tiếp trên host; chỉ Qdrant chạy container. Vì vậy:
+
+- cần NVIDIA driver và CUDA-compatible PyTorch wheel;
+- **không cần NVIDIA Container Toolkit** cho Qdrant;
+- CPU vẫn chạy được nhưng ingestion và request đầu tiên có thể rất chậm.
+
+Kiểm tra:
+
+```text
+Python 3.12.x
+Docker + docker compose
+NVIDIA driver/nvidia-smi nếu dùng GPU
+```
+
+### Dung lượng cần dự trù
+
+Không có một con số cố định. Tính riêng:
+
+- source video;
+- extracted JPEG keyframes;
+- Hugging Face cache (SigLIP Giant lớn hơn nhiều So400m/CLIP);
+- live Qdrant storage;
+- snapshot release;
+- Parquet manifests và SQLite job DB.
+
+Không đặt live Qdrant storage trên ổ tạm hoặc thư mục tự dọn.
+
+## 4. Cài công cụ trên máy mới
+
+### 4.1 Windows 11 workstation
+
+1. Cài [Git for Windows](https://git-scm.com/download/win).
+2. Cài Python 3.12 từ [python.org](https://www.python.org/downloads/). Bật
+   Python Launcher (`py`) trong installer.
+3. Cài [Docker Desktop for Windows](https://docs.docker.com/desktop/setup/install/windows-install/)
+   với WSL 2 backend và Linux containers.
+4. Nếu dùng frontend, cài Node.js `^20.19.0` hoặc `>=22.12.0`.
+5. Nếu dùng GPU, cài NVIDIA driver và chọn command PyTorch phù hợp tại
+   [PyTorch Start Locally](https://pytorch.org/get-started/locally/).
+
+Mở PowerShell mới và kiểm tra:
+
+```powershell
+git --version
+py -3.12 --version
 docker --version
 docker compose version
+nvidia-smi # bỏ qua nếu không có NVIDIA GPU
+node --version # chỉ cần cho frontend
+npm --version  # chỉ cần cho frontend
+```
+
+Nếu PowerShell không cho activate venv, chỉ mở quyền cho process hiện tại:
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+```
+
+Không cần thay execution policy toàn máy.
+
+### 4.2 Ubuntu server
+
+Ubuntu 24.04 được khuyến nghị vì có Python 3.12 trong repository mặc định.
+Ubuntu 22.04 vẫn dùng được nhưng cần cài Python 3.12 qua nguồn tin cậy/pyenv.
+
+Ubuntu 24.04:
+
+```bash
+sudo apt update
+sudo apt install -y \
+  git curl ca-certificates build-essential \
+  python3.12 python3.12-venv python3.12-dev
+```
+
+Cài Docker Engine và Compose plugin từ repository chính thức theo
+[Docker Engine on Ubuntu](https://docs.docker.com/engine/install/ubuntu/).
+Các package cuối cùng cần có:
+
+```bash
+sudo apt install -y \
+  docker-ce docker-ce-cli containerd.io \
+  docker-buildx-plugin docker-compose-plugin
+sudo systemctl enable --now docker
+sudo docker run --rm hello-world
+```
+
+Để chạy Docker không cần `sudo`:
+
+```bash
+sudo usermod -aG docker "$USER"
+newgrp docker
+docker version
+docker compose version
+```
+
+Quyền trong group `docker` tương đương quyền quản trị container trên host; chỉ
+thêm user vận hành tin cậy.
+
+Nếu dùng GPU, cài NVIDIA driver trên host rồi kiểm tra:
+
+```bash
 nvidia-smi
 ```
 
-Nếu máy không có GPU, API vẫn có thể chạy trên CPU nhưng ingestion và encode
-query bằng SigLIP sẽ chậm đáng kể. Cài Docker theo
-[hướng dẫn Docker Engine cho Ubuntu](https://docs.docker.com/engine/install/ubuntu/)
-và cài PyTorch CUDA theo
-[PyTorch Start Locally](https://pytorch.org/get-started/locally/) để khớp với
-NVIDIA driver của server.
+Không cài CUDA toolkit hệ thống một cách ngẫu nhiên để sửa lỗi PyTorch. Chọn
+wheel tương thích từ PyTorch selector và xác minh bằng `torch.cuda.is_available()`.
 
-## 3. Chuẩn bị repository
+## 5. Clone và tạo Python environment
 
-Các ví dụ bên dưới giả sử repository nằm đúng tại `/opt/aic2026`. Nếu đặt ở
-vị trí khác, phải sửa toàn bộ absolute path tương ứng trong `.env`.
+### Windows
+
+Ví dụ workspace `D:\AIC2026`:
+
+```powershell
+New-Item -ItemType Directory -Force D:\AIC2026
+Set-Location D:\AIC2026
+git clone <BACKEND_REPOSITORY_URL> aic2026-be
+Set-Location aic2026-be
+
+py -3.12 -m venv venv
+Set-ExecutionPolicy -Scope Process Bypass
+.\venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip setuptools wheel
+```
+
+### Ubuntu
+
+Ví dụ deployment root `/opt/aic2026`:
 
 ```bash
 sudo mkdir -p /opt/aic2026
 sudo chown -R "$(id -u):$(id -g)" /opt/aic2026
-
-# Chạy lệnh clone thật của repository vào đúng thư mục này.
 git clone <BACKEND_REPOSITORY_URL> /opt/aic2026
 cd /opt/aic2026
-```
 
-Tạo virtual environment:
-
-```bash
 python3.12 -m venv venv
 source venv/bin/activate
 python -m pip install --upgrade pip setuptools wheel
 ```
 
-Nếu dùng GPU, cài CUDA-enabled PyTorch theo command được PyTorch selector sinh
-ra trước. Sau đó cài dependency của project:
+### Cài dependencies
+
+Nếu dùng GPU, cài CUDA-enabled PyTorch theo command do PyTorch selector cung
+cấp **trước**, sau đó cài project dependencies:
 
 ```bash
 python -m pip install -r requirements.txt
 ```
 
-Kiểm tra runtime:
+Cho development/tests:
+
+```bash
+python -m pip install -r requirements-dev.txt
+```
+
+Xác minh runtime:
 
 ```bash
 python -c "import torch; print('torch:', torch.__version__); print('cuda:', torch.cuda.is_available())"
 python -c "import av, pyarrow, qdrant_client, transformers; print('backend dependencies: OK')"
 ```
 
-Nếu `torch.cuda.is_available()` trả về `False` trên máy có NVIDIA GPU, chưa
-nên ingest dataset lớn. Kiểm tra lại NVIDIA driver và wheel PyTorch đã cài.
+Nếu máy có NVIDIA nhưng CUDA là `False`, chưa ingest dataset lớn. Kiểm tra driver
+và PyTorch wheel trước.
 
-## 4. Cấu hình môi trường
+## 6. Tạo cấu hình `.env`
 
 Từ repository root:
 
 ```bash
-cd /opt/aic2026
 cp .env.example .env
-openssl rand -hex 32
+python -c "import secrets; print(secrets.token_hex(32))"
 ```
 
-Copy chuỗi ngẫu nhiên vừa sinh và thay giá trị
-`replace-with-a-random-secret` trong `.env`:
+PowerShell:
+
+```powershell
+Copy-Item .env.example .env
+python -c "import secrets; print(secrets.token_hex(32))"
+```
+
+Copy secret vừa tạo vào `QDRANT_API_KEY`.
+
+### Ubuntu example
 
 ```dotenv
 QDRANT_BIND_ADDRESS=127.0.0.1
@@ -138,90 +276,95 @@ QDRANT_FRAMES_COLLECTION=aic2026-frames-siglip2-so400m-v1
 QDRANT_CLIPS_COLLECTION=aic2026-clips-siglip2-so400m-v1
 ```
 
-Các nguyên tắc quan trọng:
+### Windows example
 
-- Không commit `.env`.
-- `INGESTION_DATA_ROOT` phải là absolute path và mọi manifest được gửi vào
-  ingestion API phải nằm bên trong thư mục này.
-- `FEATURE_PROFILE` phải giống chính xác profile dùng khi ingest collection.
-- Mỗi lần thay dataset hoặc model phải dùng tên collection versioned mới.
-- Không đổi `QDRANT_BIND_ADDRESS` thành `0.0.0.0` nếu chưa có firewall, TLS và
-  lý do rõ ràng để expose Qdrant.
+Dùng forward slash để path dễ đọc và không phải escape:
 
-Export `.env` vào shell hiện tại. Snapshot tool và các Python subprocess đọc
-biến môi trường của process; chúng không tự source shell file:
+```dotenv
+QDRANT_BIND_ADDRESS=127.0.0.1
+QDRANT_HTTP_PORT=6333
+QDRANT_GRPC_PORT=6334
+QDRANT_URL=http://127.0.0.1:6333
+QDRANT_API_KEY=<RANDOM_SECRET>
 
-```bash
-set -a
-. /opt/aic2026/.env
-set +a
+INGESTION_DATA_ROOT=D:/AIC2026/aic2026-be/data
+INGESTION_DB_PATH=D:/AIC2026/aic2026-be/data/ingestion.db
+
+FEATURE_PROFILE=siglip2-so400m-patch14-384-v1
+QDRANT_FRAMES_COLLECTION=aic2026-frames-siglip2-so400m-v1
+QDRANT_CLIPS_COLLECTION=aic2026-clips-siglip2-so400m-v1
 ```
 
-## 5. Khởi động Qdrant
+Quy tắc:
 
-Compose đang pin Qdrant `v1.12.1`, bật API key, chỉ publish trên loopback và
-persist dữ liệu xuống `data/qdrant/`.
+- không commit `.env`;
+- dùng absolute path cho ingestion trên server;
+- mọi manifest gửi vào API phải nằm dưới `INGESTION_DATA_ROOT`;
+- `FEATURE_PROFILE` phải khớp collection active;
+- dataset/model mới phải dùng collection name versioned mới;
+- giữ Qdrant trên loopback trừ khi có private network/firewall/TLS rõ ràng.
+
+## 7. Khởi động Qdrant
+
+Compose pin Qdrant `v1.12.1`, yêu cầu API key và persist vào bind mounts.
+
+Linux:
 
 ```bash
-cd /opt/aic2026
 mkdir -p data/qdrant/storage data/qdrant/snapshots
 docker compose up -d qdrant
 docker compose ps
 ```
 
-Kiểm tra Qdrant:
+PowerShell:
 
-```bash
-curl --fail \
-  -H "api-key: ${QDRANT_API_KEY}" \
-  http://127.0.0.1:6333/readyz
-
-curl --fail \
-  -H "api-key: ${QDRANT_API_KEY}" \
-  http://127.0.0.1:6333/collections
+```powershell
+New-Item -ItemType Directory -Force data\qdrant\storage, data\qdrant\snapshots
+docker compose up -d qdrant
+docker compose ps
 ```
 
-Xem log:
+Load `.env` vào Linux shell và kiểm tra:
+
+```bash
+set -a
+. ./.env
+set +a
+
+curl --fail -H "api-key: ${QDRANT_API_KEY}" http://127.0.0.1:6333/readyz
+curl --fail -H "api-key: ${QDRANT_API_KEY}" http://127.0.0.1:6333/collections
+```
+
+PowerShell:
+
+```powershell
+$QdrantKey = (Get-Content .env | Where-Object { $_ -match '^QDRANT_API_KEY=' }) -replace '^QDRANT_API_KEY=', ''
+curl.exe --fail -H "api-key: $QdrantKey" http://127.0.0.1:6333/readyz
+curl.exe --fail -H "api-key: $QdrantKey" http://127.0.0.1:6333/collections
+```
+
+Logs:
 
 ```bash
 docker compose logs -f qdrant
 ```
 
-Dữ liệu Qdrant không mất khi restart container vì hai thư mục sau được mount:
+Không chạy `docker compose down -v` và không xóa `data/qdrant/storage` khi chưa
+có snapshot/backup đã kiểm tra.
 
-```text
-/opt/aic2026/data/qdrant/storage
-/opt/aic2026/data/qdrant/snapshots
-```
+## 8. Cache embedding model
 
-Không dùng `docker compose down -v` hoặc xóa các thư mục trên khi chưa có
-snapshot/backup.
+Profiles hiện có:
 
-## 6. Cache embedding model
+| Profile | Model ID | Dimension | Ghi chú |
+| --- | --- | ---: | --- |
+| `siglip2-giant-opt-patch16-384-v1` | `google/siglip2-giant-opt-patch16-384` | 1536 | Accuracy-first, VRAM cao |
+| `siglip2-so400m-patch14-384-v1` | `google/siglip2-so400m-patch14-384` | 1152 | Mặc định |
+| `clip-b32-v1` | `openai/clip-vit-base-patch32` | 512 | Nhẹ/compatibility |
 
-Profile mặc định tiết kiệm VRAM hơn là:
-
-```text
-siglip2-so400m-patch14-384-v1
-model: google/siglip2-so400m-patch14-384
-dimension: 1152
-```
-
-Profile ưu tiên accuracy nhưng cần nhiều VRAM hơn:
-
-```text
-siglip2-giant-opt-patch16-384-v1
-model: google/siglip2-giant-opt-patch16-384
-dimension: 1536
-```
-
-Lần ingest hoặc search đầu tiên, Transformers sẽ tải model từ Hugging Face.
-Nên cache model trước thay vì đợi một job dài tải giữa chừng:
+Pre-download model trước ingestion/competition:
 
 ```bash
-cd /opt/aic2026
-source venv/bin/activate
-
 python - <<'PY'
 from transformers import AutoModel, AutoProcessor
 
@@ -232,13 +375,21 @@ print(f"cached: {model_id}")
 PY
 ```
 
-Nếu dùng Giant, đổi `model_id` cho đúng. Khi server phải chạy offline, cần
-backup/copy Hugging Face cache sang server nhận. Snapshot Qdrant không chứa
-model dùng để encode text query.
+PowerShell không hỗ trợ Bash heredoc; dùng file tạm hoặc một dòng:
 
-## 7. Chạy FastAPI bằng tay
+```powershell
+python -c "from transformers import AutoModel, AutoProcessor; m='google/siglip2-so400m-patch14-384'; AutoProcessor.from_pretrained(m); AutoModel.from_pretrained(m); print('cached:', m)"
+```
 
-Đây là cách chạy để thử trước khi tạo systemd service.
+Đổi model ID nếu dùng Giant/CLIP. Máy offline cần được copy Hugging Face cache.
+Qdrant snapshot không chứa text encoder.
+
+## 9. Chạy FastAPI bằng tay
+
+API và detached runner cần import package `app`, vì vậy working directory phải
+là `backend/`.
+
+### Linux
 
 ```bash
 cd /opt/aic2026
@@ -254,74 +405,75 @@ python -m uvicorn app.main:app \
   --workers 1
 ```
 
-Phải dùng `backend/` làm working directory. API tạo ingestion runner bằng
-`python -m app.ingestion.runner`; working directory này giúp subprocess import
-package `app` đúng cách.
+### Windows PowerShell
 
-Chỉ dùng một Uvicorn worker khi model chạy trên GPU. Nhiều worker sẽ load nhiều
-bản model và có thể làm đầy VRAM.
+```powershell
+Set-Location D:\AIC2026\aic2026-be
+Set-ExecutionPolicy -Scope Process Bypass
+.\venv\Scripts\Activate.ps1
+Set-Location backend
 
-Từ terminal khác:
+Get-Content ..\.env |
+  Where-Object { $_ -match '^[A-Za-z_][A-Za-z0-9_]*=' } |
+  ForEach-Object {
+    $name, $value = $_ -split '=', 2
+    Set-Item -Path "Env:$name" -Value $value
+  }
+
+python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1
+```
+
+Dùng một worker khi model chạy GPU; nhiều worker load nhiều bản model và có thể
+làm đầy VRAM.
+
+Health/API docs:
 
 ```bash
 curl --fail http://127.0.0.1:8000/api/v1/health/live
 curl --fail http://127.0.0.1:8000/api/v1/health/ready
 ```
 
-OpenAPI UI:
+Windows dùng `curl.exe` thay `curl`.
 
 ```text
-http://127.0.0.1:8000/docs
-http://127.0.0.1:8000/redoc
-http://127.0.0.1:8000/openapi.json
+Swagger: http://127.0.0.1:8000/docs
+ReDoc:   http://127.0.0.1:8000/redoc
+OpenAPI: http://127.0.0.1:8000/openapi.json
 ```
 
-`/health/ready` hiện chỉ xác nhận application container đã khởi tạo. Nó chưa
-kiểm tra model, Qdrant hay active collection. Một search request thành công
-mới là end-to-end readiness check.
+`ready` không warm model, không query Qdrant và không kiểm tra active collection.
+Phải chạy search thật ở mục 13 để xác nhận end-to-end.
 
-## 8. Hai cách có dữ liệu trong Qdrant
+## 10. Restore snapshot không embed lại
 
-Có hai luồng triển khai độc lập:
-
-1. Restore snapshot đã embed sẵn: nhanh nhất cho máy nhận code/dataset release.
-2. Tự build manifests và ingest: dùng khi dataset/model thay đổi hoặc cần audit.
-
-Nếu đã có snapshot, chuyển thẳng đến mục 9. Nếu phải ingest mới, dùng mục 10.
-
-## 9. Restore snapshot đã embed sẵn
-
-Copy cả release directory gồm snapshot frames, snapshot clips và
-`snapshot-manifest.json` vào server. Sau khi Qdrant chạy:
+Snapshot release phải gồm mọi `.snapshot` và `snapshot-manifest.json` trong cùng
+thư mục. Sau khi Qdrant chạy và environment variables đã load:
 
 ```bash
-cd /opt/aic2026
-source venv/bin/activate
-set -a
-. ./.env
-set +a
-
 python scripts/qdrant_snapshot.py restore \
   --manifest /path/to/release-001/snapshot-manifest.json
 ```
 
-Restore tool sẽ:
+PowerShell:
 
-- kiểm tra SHA-256 của từng file;
-- kiểm tra Qdrant cùng minor version và target patch không thấp hơn source;
-- từ chối overwrite collection đang tồn tại;
-- restore vectors, payloads, payload indexes và collection configuration.
+```powershell
+python scripts\qdrant_snapshot.py restore `
+  --manifest D:\releases\release-001\snapshot-manifest.json
+```
 
-Nếu muốn restore thành tên version mới:
+Tool sẽ kiểm tra SHA-256, Qdrant version compatibility và từ chối overwrite
+collection đã tồn tại.
+
+Restore dưới tên mới:
 
 ```bash
 python scripts/qdrant_snapshot.py restore \
-  --manifest /path/to/release-001/snapshot-manifest.json \
+  --manifest /path/to/snapshot-manifest.json \
   --map aic2026-frames-siglip2-so400m-v1=aic2026-frames-release-002 \
   --map aic2026-clips-siglip2-so400m-v1=aic2026-clips-release-002
 ```
 
-Sau restore, sửa ba giá trị trong `.env` để trỏ đúng release vừa restore:
+Sau restore, update `.env`:
 
 ```dotenv
 FEATURE_PROFILE=<profile trong snapshot-manifest.json>
@@ -329,23 +481,22 @@ QDRANT_FRAMES_COLLECTION=<restored frames collection>
 QDRANT_CLIPS_COLLECTION=<restored clips collection>
 ```
 
-Sau đó restart API. Người nhận không cần embed lại media, nhưng vẫn cần:
+Restart API. Snapshot không chứa:
 
-- đúng model/profile để encode text query;
-- source video/keyframe nếu chức năng hiển thị media cần đọc payload `path`;
-- Parquet manifests nếu muốn audit hoặc rebuild.
+- Hugging Face model cache;
+- source videos hoặc extracted keyframes;
+- Parquet manifests;
+- Qdrant aliases.
 
-Collection snapshot không bao gồm Qdrant aliases, vì vậy app chọn collection
-qua `.env`.
+Media endpoint cần source/keyframes đúng path. Parquet manifests cần được giữ
+để audit/rebuild.
 
-## 10. Ingest mới từ source video
+## 11. Build manifest và ingest từ source
 
-### 10.1 Chuẩn bị layout dữ liệu
-
-Ví dụ:
+### 11.1 Layout dữ liệu
 
 ```text
-/opt/aic2026/data/
+<INGESTION_DATA_ROOT>/
 ├── videos/
 │   ├── L01_V001.mp4
 │   └── L01_V002.mp4
@@ -353,57 +504,61 @@ Ví dụ:
 └── manifests/
 ```
 
-Tên file video trở thành `video_id`. Với dữ liệu AIC, giữ convention
-`Lxx_Vxxx`, ví dụ `L01_V001.mp4`.
+Stem tên video trở thành `video_id`; giữ convention `Lxx_Vxxx`.
 
-Tất cả các lệnh preprocessing dưới đây chạy trong `backend/`:
+Mọi command preprocessing chạy từ `backend/` với environment đã activate.
 
-```bash
-cd /opt/aic2026
-source venv/bin/activate
-set -a
-. ./.env
-set +a
-cd backend
-```
+### 11.2 Trial slice trước
 
-### 10.2 Probe video
-
-Probe codec, resolution, rotation, exact FPS và khả năng decode:
+Trước dataset lớn, dùng `--limit` để xác minh một vài video:
 
 ```bash
 python -m app.ingestion.video.probe \
   --source /opt/aic2026/data/videos \
-  --out /opt/aic2026/data/manifests/videos.parquet
+  --out /opt/aic2026/data/manifests/videos-trial.parquet \
+  --limit 2
 ```
 
-Pipeline hiện yêu cầu constant frame rate. Video VFR sẽ bị từ chối ở các bước
-sau vì không thể ánh xạ chính xác `original_frame_id` bằng một FPS duy nhất.
+Trên Windows thay path bằng `D:/AIC2026/aic2026-be/data/...`.
 
-### 10.3 Detect shots và tạo clips manifest
+### 11.3 Probe video
 
-Accuracy-first detector:
+```bash
+python -m app.ingestion.video.probe \
+  --source /opt/aic2026/data/videos \
+  --out /opt/aic2026/data/manifests/videos.parquet \
+  --resume
+```
+
+Manifest giữ codec, resolution, rotation, exact FPS, frame count và duration.
+Pipeline yêu cầu constant frame rate; video VFR bị từ chối để bảo vệ
+`original_frame_id`.
+
+### 11.4 Shot detection
+
+Accuracy-first:
 
 ```bash
 python -m app.ingestion.video.shot_detect \
   --videos-manifest /opt/aic2026/data/manifests/videos.parquet \
   --out /opt/aic2026/data/manifests/clips.parquet \
-  --detector transnetv2
+  --detector transnetv2 \
+  --resume
 ```
 
-Fallback nhẹ hơn, không dùng TransNetV2:
+Content detector nhẹ hơn:
 
 ```bash
 python -m app.ingestion.video.shot_detect \
   --videos-manifest /opt/aic2026/data/manifests/videos.parquet \
   --out /opt/aic2026/data/manifests/clips.parquet \
-  --detector content
+  --detector content \
+  --resume
 ```
 
-`clips.parquet` chứa inclusive `start_frame`/`end_frame`, timestamps, video
-path và `shot_id`. Nó chính là manifest dùng để ingest entity `clips`.
+Không đổi threshold trên full dataset trước khi kiểm tra trial output.
 
-### 10.4 Extract keyframes và tạo frames manifest
+### 11.5 Extract keyframes
 
 ```bash
 python -m app.ingestion.video.sampling \
@@ -413,15 +568,43 @@ python -m app.ingestion.video.sampling \
   --out /opt/aic2026/data/manifests/frames.parquet
 ```
 
-Mặc định sampler lấy khoảng một keyframe mỗi giây của shot, tránh biên shot
-và chọn frame sắc nét nhất trong cửa sổ nhỏ. `frames.parquet` lưu
-`original_frame_id`, không đánh lại index.
+Sampler giữ `original_frame_id`; không đánh lại index frame.
 
-### 10.5 Gửi ingestion jobs
+### 11.6 Import artifacts tạo bên ngoài
 
-API phải đang chạy theo mục 7 hoặc 12.
+Keyframes có sẵn:
 
-Frames collection:
+```bash
+python -m app.ingestion.batch_builder keyframes \
+  --source /path/to/keyframes \
+  --out /opt/aic2026/data/manifests/frames.parquet \
+  --shots-manifest /opt/aic2026/data/manifests/clips.parquet \
+  --videos-manifest /opt/aic2026/data/manifests/videos.parquet
+```
+
+Shot CSV có columns `video_id,start_frame,end_frame`:
+
+```bash
+python -m app.ingestion.batch_builder shots \
+  --csv /path/to/shots.csv \
+  --out /opt/aic2026/data/manifests/clips.parquet \
+  --videos-manifest /opt/aic2026/data/manifests/videos.parquet
+```
+
+Nếu không có video manifest, truyền FPS chính xác bằng `--fps 25` hoặc
+`--fps 30000/1001`; tool không đoán FPS.
+
+### 11.7 Chọn feature profile
+
+```bash
+curl --fail http://127.0.0.1:8000/api/v1/ingestions/feature-profiles
+```
+
+Frontend Ingestion page dùng endpoint này để render dropdown model.
+
+### 11.8 Tạo ingestion jobs
+
+Frames:
 
 ```bash
 curl --fail-with-body -X POST \
@@ -435,7 +618,7 @@ curl --fail-with-body -X POST \
   }'
 ```
 
-Clips collection:
+Clips:
 
 ```bash
 curl --fail-with-body -X POST \
@@ -449,20 +632,17 @@ curl --fail-with-body -X POST \
   }'
 ```
 
-Mỗi request trả `job_id`. Theo dõi toàn bộ jobs:
+Windows có thể dùng Swagger UI hoặc frontend Ingestion page để tránh escape JSON
+trong PowerShell. Manifest path vẫn là path mà **backend process** đọc được.
+
+Theo dõi:
 
 ```bash
 curl --fail http://127.0.0.1:8000/api/v1/ingestions
+curl --fail http://127.0.0.1:8000/api/v1/ingestions/<JOB_ID>
 ```
 
-Theo dõi một job:
-
-```bash
-curl --fail \
-  http://127.0.0.1:8000/api/v1/ingestions/<JOB_ID>
-```
-
-Job thành công khi có:
+Job hoàn tất khi:
 
 ```json
 {
@@ -472,13 +652,12 @@ Job thành công khi có:
 }
 ```
 
-Ingestion tạo collection mới, payload indexes, upsert embedding theo batch rồi
-đợi Qdrant optimize về trạng thái green. Không restart API hoặc server trong
-lúc chưa chắc detached ingestion runner đã hoàn thành.
+Runner là detached subprocess và ghi state vào SQLite. Không shutdown/reboot máy
+khi job đang `running`.
 
-### 10.6 Activate collection
+### 11.9 Activate collection
 
-Sau khi cả hai jobs thành công, cập nhật `.env`:
+Ingestion không tự đổi active collection. Sau khi đánh giá và cả jobs thành công:
 
 ```dotenv
 FEATURE_PROFILE=siglip2-so400m-patch14-384-v1
@@ -486,48 +665,17 @@ QDRANT_FRAMES_COLLECTION=aic2026-frames-siglip2-so400m-v1
 QDRANT_CLIPS_COLLECTION=aic2026-clips-siglip2-so400m-v1
 ```
 
-Restart API để nạp configuration mới. Ingestion không tự đổi active
-collection.
+Restart API để load config mới.
 
-## 11. Kiểm tra search end-to-end
+## 12. Chạy lâu dài trên Ubuntu bằng systemd
 
-KIS search:
-
-```bash
-curl --fail-with-body -X POST \
-  http://127.0.0.1:8000/api/v1/search/kis \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "task": "kis",
-    "description": "một người đang đi xe đạp trên đường phố",
-    "top_k": 10
-  }'
-```
-
-Response phải có:
-
-- `results` với `video_id`, `frame_ids`, `score`;
-- `versions.frames_collection` đúng collection active;
-- `versions.model_config_name` đúng feature profile;
-- `latency_ms` có thời gian encode/query/rerank.
-
-QA endpoint hiện tìm frame liên quan nhưng chưa có VQA model, vì vậy trường
-`answer` vẫn là `null`. TRAKE tìm một chuỗi frame tăng dần theo thứ tự events.
-
-Các endpoint media `/api/v1/videos/...` và submission export hiện chưa có
-service implementation trong runtime container. Không dùng chúng làm tiêu chí
-đánh giá deployment đã sẵn sàng.
-
-## 12. Chạy API lâu dài bằng systemd
-
-Sau khi chạy tay thành công, tạo service:
+Chỉ tạo service sau khi chạy tay thành công.
 
 ```bash
 sudo editor /etc/systemd/system/aic2026-api.service
 ```
 
-Nội dung dưới đây giả sử user Linux chạy app là `ubuntu`. Thay `User` và
-`Group` cho đúng máy:
+Thay `User`, `Group` và path nếu deployment khác `/opt/aic2026`:
 
 ```ini
 [Unit]
@@ -551,40 +699,63 @@ TimeoutStopSec=30
 WantedBy=multi-user.target
 ```
 
-Enable service:
-
 ```bash
 sudo systemctl daemon-reload
 sudo systemctl enable --now aic2026-api
 sudo systemctl status aic2026-api
-```
-
-Xem log:
-
-```bash
 journalctl -u aic2026-api -f
 ```
 
-Sau mỗi lần sửa `.env` hoặc deploy code mới:
+Sau khi thay `.env` hoặc deploy code:
 
 ```bash
 sudo systemctl restart aic2026-api
 ```
 
-FastAPI cũng bind loopback. Expose API qua reverse proxy có TLS hoặc SSH
-tunnel, không expose trực tiếp development server ra internet.
+API bind loopback. Expose qua private reverse proxy/TLS/SSH tunnel; không publish
+development Uvicorn trực tiếp ra internet.
 
-## 13. Tạo snapshot để bàn giao release
+## 13. Kiểm tra end-to-end
 
-Chỉ tạo snapshot sau khi ingestion job thành công và collection đã optimize:
+KIS:
 
 ```bash
-cd /opt/aic2026
-source venv/bin/activate
-set -a
-. ./.env
-set +a
+curl --fail-with-body -X POST \
+  http://127.0.0.1:8000/api/v1/search/kis \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "task": "kis",
+    "description": "một người đang đi xe đạp trên đường phố",
+    "top_k": 10
+  }'
+```
 
+Response cần có:
+
+- `results[].video_id`, `frame_ids`, `score`;
+- `versions.frames_collection` đúng active collection;
+- `versions.model_config_name` đúng profile;
+- `latency_ms` có encode/Qdrant/rerank.
+
+Kiểm tra media bằng một result thật:
+
+```text
+GET /api/v1/videos/<VIDEO_ID>/frames/<FRAME_ID>
+GET /api/v1/videos/<VIDEO_ID>/clip?center_frame=<FRAME_ID>&radius=90
+```
+
+Frame chỉ tồn tại nếu đúng sampled keyframe. Clip cần `videos.parquet` và source
+video path còn đọc được. Submission export hiện có contract nhưng runtime chưa
+wire `SubmissionService`, không dùng nó làm readiness criterion.
+
+QA hiện retrieval frame nhưng không tự sinh answer. TRAKE trả frame sequence tăng
+dần theo event order.
+
+## 14. Tạo snapshot release
+
+Chỉ tạo sau khi ingestion thành công và collection green:
+
+```bash
 python scripts/qdrant_snapshot.py create \
   --collection aic2026-frames-siglip2-so400m-v1 \
   --collection aic2026-clips-siglip2-so400m-v1 \
@@ -592,110 +763,174 @@ python scripts/qdrant_snapshot.py create \
   --output-dir artifacts/qdrant-snapshots/release-001
 ```
 
-Bàn giao toàn bộ `release-001/`, không chỉ một file snapshot. Manifest đi kèm
-là nơi ghi profile và checksum của cả release.
+Bàn giao toàn bộ `release-001/`, không chỉ file `.snapshot`. Không copy trực tiếp
+live `data/qdrant/storage` sang máy khác.
 
-Không copy trực tiếp live directory `data/qdrant/storage` sang máy khác. Dùng
-Qdrant collection snapshot để có artifact nhất quán.
+## 15. Setup frontend trên cùng máy hoặc LAN
 
-## 14. Validation trước khi bàn giao
-
-Chạy test từ repository root:
+Frontend nằm ở repository riêng. Development:
 
 ```bash
-cd /opt/aic2026
-source venv/bin/activate
-python -m pip install -r requirements-dev.txt
-python -m pytest backend/tests -q
+cd /path/to/aic2026-fe
+npm install
+cp .env.example .env.local
+npm run dev
 ```
 
-Checklist release:
+Nếu backend ở máy khác:
 
-- Qdrant `/readyz` trả thành công.
-- Frames và clips ingestion jobs đều `succeeded`.
-- Qdrant collections đúng point count dự kiến.
-- `.env` trỏ đúng versioned collection và feature profile.
-- KIS search trả kết quả và versions đúng.
-- Snapshot manifest và tất cả `.snapshot` đã được chuyển cùng nhau.
-- Hugging Face model cache đã có nếu máy nhận chạy offline.
-- Source media được chuyển riêng nếu UI cần xem frame/video.
-- Parquet manifests được giữ lại để audit/rebuild.
+```dotenv
+VITE_API_BASE_URL=/api/v1
+VITE_DEV_PROXY_TARGET=http://<BACKEND_LAN_IP>:8000
+```
 
-## 15. Troubleshooting
+Vite proxy tránh CORS. Không mở thẳng browser sang origin backend khác khi backend
+chưa có CORS middleware.
 
-### Qdrant không khởi động
+## 16. Validation trước handoff
+
+Backend unit tests từ repository root:
+
+```bash
+source venv/bin/activate
+python -m pytest backend/tests/unit -q
+```
+
+PowerShell:
+
+```powershell
+$env:PYTHONPATH = "$PWD\backend;$PWD"
+.\venv\Scripts\python.exe -m pytest backend\tests\unit -q
+```
+
+Integration tests cần Qdrant:
+
+```bash
+python -m pytest backend/tests/integration -q
+```
+
+Checklist:
+
+- Qdrant `/readyz` thành công với API key.
+- API live/ready thành công.
+- Model cache có sẵn; CUDA state đúng kỳ vọng.
+- Frame/clip jobs `succeeded` hoặc snapshot restore hoàn tất.
+- `.env` trỏ đúng collection/profile version.
+- KIS search trả result và diagnostics đúng.
+- Media paths tồn tại nếu UI cần frame/clip.
+- Snapshot manifest và mọi snapshot được bàn giao cùng nhau.
+- Parquet manifests được lưu để audit/rebuild.
+- Không commit `.env`, dataset, model cache hoặc live Qdrant storage.
+
+## 17. Troubleshooting
+
+### Qdrant không start
 
 ```bash
 docker compose ps
 docker compose logs --tail=200 qdrant
-sudo ss -ltnp | grep -E '6333|6334'
 ```
 
-Kiểm tra `.env` có `QDRANT_API_KEY` không rỗng và port chưa bị process khác
-chiếm.
+Kiểm tra API key không rỗng, Docker đang chạy và port 6333/6334 chưa bị chiếm.
+Trên Windows, xác nhận Docker Desktop đang dùng Linux containers.
 
-### API chạy nhưng search lỗi collection not found
+### API import lỗi `app`
 
-Kiểm tra collection thực tế:
-
-```bash
-curl --fail \
-  -H "api-key: ${QDRANT_API_KEY}" \
-  http://127.0.0.1:6333/collections
-```
-
-Sau đó đối chiếu `QDRANT_FRAMES_COLLECTION` trong `.env` và restart API.
-
-### Ingestion trả HTTP 400
-
-`manifest_path` phải nằm trong `INGESTION_DATA_ROOT`. Dùng absolute path như:
-
-```text
-/opt/aic2026/data/manifests/frames.parquet
-```
-
-### Job chuyển sang failed
-
-Đọc trường `error`:
-
-```bash
-curl --fail http://127.0.0.1:8000/api/v1/ingestions/<JOB_ID>
-```
-
-Các nguyên nhân thường gặp:
-
-- model chưa tải được hoặc server không có internet/cache;
-- CUDA out of memory;
-- đường dẫn ảnh/video trong Parquet không tồn tại trên server;
-- manifest thiếu column hoặc dùng sai entity;
-- collection Qdrant cùng tên đã tồn tại;
-- source video là variable frame rate.
-
-Nếu thiếu VRAM, tạo collection mới bằng
-`siglip2-so400m-patch14-384-v1`. Không đổi profile giữa collection đang ingest
-và API query.
-
-### Runner không import được package app
-
-API phải có:
+Chạy Uvicorn từ `backend/`. Với systemd:
 
 ```text
 WorkingDirectory=/opt/aic2026/backend
 ```
 
-Khi chạy tay, phải `cd /opt/aic2026/backend` trước khi chạy Uvicorn.
+### API không đọc `.env`
 
-### Restore snapshot bị version mismatch
+Compose tự đọc `.env` ở repository root. API chạy từ `backend/` nên runbook chủ
+động export biến vào process hoặc systemd `EnvironmentFile`. Trên Windows, chạy
+PowerShell import block tại mục 9.
 
-Chạy source và target bằng Qdrant cùng minor version; target patch phải bằng
-hoặc mới hơn source patch. Cách an toàn nhất là dùng cùng
-`docker-compose.yml`. Không dùng `--allow-version-mismatch` trừ khi đã đọc và
-xác minh compatibility từ Qdrant.
+### Health ready nhưng search lỗi collection not found
 
-## 16. Tài liệu liên quan
+Liệt kê Qdrant collections và đối chiếu `.env`:
 
+```bash
+curl --fail -H "api-key: ${QDRANT_API_KEY}" http://127.0.0.1:6333/collections
+```
+
+Sửa `QDRANT_FRAMES_COLLECTION`, xác nhận `FEATURE_PROFILE`, rồi restart API.
+
+### Request search đầu tiên rất chậm
+
+Model đang được download/load hoặc CPU đang encode. Kiểm tra:
+
+- backend log;
+- Hugging Face cache;
+- internet ở lần cache đầu;
+- `torch.cuda.is_available()`;
+- VRAM bằng `nvidia-smi`.
+
+### Ingestion HTTP 400
+
+Thường do:
+
+- `manifest_path` nằm ngoài `INGESTION_DATA_ROOT`;
+- feature profile không có trong registry;
+- path Windows được gửi theo máy browser thay vì máy backend.
+
+### Ingestion HTTP 409
+
+Collection name đã được một job không-failed sử dụng. Tạo tên versioned mới;
+không overwrite collection active.
+
+### Job failed
+
+Đọc `error`:
+
+```bash
+curl --fail http://127.0.0.1:8000/api/v1/ingestions/<JOB_ID>
+```
+
+Nguyên nhân thường gặp:
+
+- model chưa cache/không tải được;
+- CUDA out of memory;
+- media path trong Parquet không tồn tại;
+- manifest sai columns/entity;
+- Qdrant không truy cập được;
+- collection cùng tên đã tồn tại;
+- video VFR.
+
+Thiếu VRAM: dùng collection mới với So400m hoặc CLIP. Không đổi profile giữa
+chừng trên cùng collection.
+
+### Frame 404
+
+Frame endpoint đọc sampled JPEG, không decode mọi arbitrary frame. Kiểm tra
+`data/keyframes/<video_id>/` và frame ID từ search result.
+
+### Clip 404/422
+
+- `videos.parquet` phải nằm tại `data/manifests/videos.parquet`;
+- source video path trong manifest phải tồn tại;
+- truyền đúng một trong hai cặp `start_frame/end_frame` hoặc `center_frame/radius`;
+- clip tối đa 300 frames.
+
+### Restore snapshot version mismatch
+
+Dùng cùng Qdrant minor version; target patch phải bằng hoặc mới hơn source patch.
+Cách an toàn nhất là cùng `docker-compose.yml`. Không dùng
+`--allow-version-mismatch` nếu chưa xác minh compatibility.
+
+### Windows file sharing/Docker permission
+
+Qdrant bind mounts nằm trong repository. Nếu Docker Desktop báo không mount
+được, đặt repo trên ổ được WSL/Docker Desktop chia sẻ và kiểm tra quyền của
+`data/qdrant/`.
+
+## 18. Tài liệu liên quan
+
+- [Backend README](../README.md)
 - [Ingestion architecture](ingestion.md)
 - [Qdrant deployment and snapshot hand-off](qdrant-operations.md)
-- [Qdrant snapshot documentation](https://qdrant.tech/documentation/snapshots/)
 - [Docker Engine on Ubuntu](https://docs.docker.com/engine/install/ubuntu/)
+- [Docker Desktop on Windows](https://docs.docker.com/desktop/setup/install/windows-install/)
 - [PyTorch installation selector](https://pytorch.org/get-started/locally/)
