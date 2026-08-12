@@ -3,3 +3,12 @@ uvicorn[standard]==0.44.0
 pydantic==2.13.1
 pyarrow==18.1.0
 qdrant-client==1.12.1
+# Video container/metadata probing for ingestion. Wheels bundle FFmpeg, so no
+# system ffmpeg install is required on the competition machine.
+av==18.0.0
+# Local multilingual image/text embeddings. Install the CUDA-enabled PyTorch
+# wheel appropriate for the competition machine when GPU ingestion is used.
+numpy>=2.0,<3
+torch>=2.6,<3
+transformers>=4.49,<5
+pillow>=11,<13

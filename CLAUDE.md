@@ -15,7 +15,8 @@
 - Track modules orchestrate shared retrieval code; do not duplicate it.
 - Ingestion must build versioned collections and never modify the active
   collection during competition mode.
-- Collection activation requires validation and snapshot completion.
+- This is a single-team competition tool, not a multi-user production
+  system: do not add validation/snapshot/activation gating to ingestion.
 - Parquet manifests remain the rebuild/audit source of truth.
 
 ## Review rules

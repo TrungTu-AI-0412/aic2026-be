@@ -3,6 +3,7 @@ import uuid
 import pytest
 from qdrant_client import QdrantClient
 
+from app.schemas.ingestions import IngestionEntity
 from app.vector_store import collections, payload_indexes, upsert
 from app.vector_store.client import build_client
 from app.vector_store.collection_status import get_collection_status
@@ -36,11 +37,17 @@ def collection_name(client):
 def _build_points(count: int) -> list:
     return [
         upsert.make_point(
-            point_id=upsert.deterministic_point_id("L01_V001", str(frame_id)),
-            vector=[float((frame_id + offset) % 7) for offset in range(VECTOR_SIZE)],
-            payload={"video_id": "L01_V001", "frame_id": frame_id},
+            point_id=upsert.deterministic_point_id("L01_V001", str(original_frame_id)),
+            vector=[
+                float((original_frame_id + offset) % 7) for offset in range(VECTOR_SIZE)
+            ],
+            payload={
+                "video_id": "L01_V001",
+                "shot_id": original_frame_id // 10,
+                "original_frame_id": original_frame_id,
+            },
         )
-        for frame_id in range(count)
+        for original_frame_id in range(count)
     ]
 
 
@@ -48,7 +55,9 @@ def test_create_collection_upsert_and_read_status(client, collection_name):
     assert not collections.collection_exists(client, collection_name)
 
     collections.create_collection(client, collection_name, VECTOR_SIZE)
-    payload_indexes.create_payload_indexes(client, collection_name)
+    payload_indexes.create_payload_indexes(
+        client, collection_name, IngestionEntity.FRAMES
+    )
 
     points = _build_points(POINT_COUNT)
     upserted = upsert.upsert_points(client, collection_name, points, batch_size=32)

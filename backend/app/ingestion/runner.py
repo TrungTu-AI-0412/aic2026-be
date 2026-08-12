@@ -3,6 +3,7 @@ import sys
 
 from app.core.config import settings
 from app.ingestion import pipeline, store
+from app.schemas.ingestions import IngestionEntity
 
 
 def run(job_id: str, db_path: str) -> None:
@@ -11,15 +12,17 @@ def run(job_id: str, db_path: str) -> None:
         print(f"job {job_id} not found", file=sys.stderr)
         sys.exit(1)
 
+    entity = IngestionEntity(job["entity"])
+
     try:
         store.update_job(db_path, job_id, status="running", stage="validating")
-        total = pipeline.validate_manifest(job["manifest_path"])
+        total = pipeline.validate_manifest(job["manifest_path"], entity)
 
         store.update_job(db_path, job_id, stage="creating_collection")
         pipeline.create_collection(job["collection_name"], job["feature_profile"])
 
         store.update_job(db_path, job_id, stage="creating_payload_indexes")
-        pipeline.create_payload_indexes(job["collection_name"])
+        pipeline.create_payload_indexes(job["collection_name"], entity)
 
         store.update_job(
             db_path,
@@ -35,6 +38,7 @@ def run(job_id: str, db_path: str) -> None:
         pipeline.upsert_points(
             job["collection_name"],
             job["manifest_path"],
+            entity,
             job["feature_profile"],
             on_progress,
         )
