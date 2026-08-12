@@ -21,7 +21,7 @@ class VideoNotFoundError(Exception):
 class FrameNotFoundError(Exception):
     pass
 
-
+#TODO
 class MediaService(Protocol):
     async def get_frame(self, video_id: str, frame_id: int) -> FrameImage:
         ...
