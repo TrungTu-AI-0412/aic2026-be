@@ -1,5 +1,8 @@
 # Ingestion
 
+Để triển khai toàn bộ backend từ một Ubuntu server mới, xem
+[Ubuntu deployment runbook](runbook-ubuntu.md).
+
 Internal pipeline for building a new Qdrant collection from a dataset
 version. This is **not** a public upload API — data is copied/mounted onto
 local storage out-of-band, and the API only creates the job that turns a
@@ -234,4 +237,6 @@ GET /api/v1/ingestions/{job_id} just reads that SQLite row
 - Model weights must be downloaded into the local Hugging Face cache before
   an offline competition run. The SigLIP 2 Giant checkpoint is roughly 7.5 GB,
   and GPU inference is strongly recommended.
-- Collection optimization is still a deliberate `NotImplementedError`.
+- Collection optimization is implemented: ingestion disables HNSW indexing
+  during the bulk load, restores the indexing threshold afterward, and waits
+  for Qdrant to report the collection as green before the job succeeds.
