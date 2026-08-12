@@ -28,6 +28,10 @@ async def build_container(settings: Settings) -> Container:
                 frames_collection=settings.QDRANT_FRAMES_COLLECTION,
                 clips_collection=settings.QDRANT_CLIPS_COLLECTION,
                 feature_profile=settings.FEATURE_PROFILE,
+                clip_weight=settings.CLIP_FUSION_WEIGHT,
+                rerank_enabled=settings.RERANK_ENABLED,
+                rerank_top_n=settings.RERANK_TOP_N,
+                rerank_model=settings.RERANK_MODEL,
             )
         ),
         ingestion_service=SqliteIngestionService(

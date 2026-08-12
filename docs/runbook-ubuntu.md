@@ -274,6 +274,22 @@ INGESTION_DB_PATH=/opt/aic2026/data/ingestion.db
 FEATURE_PROFILE=siglip2-so400m-patch14-384-v1
 QDRANT_FRAMES_COLLECTION=aic2026-frames-siglip2-so400m-v1
 QDRANT_CLIPS_COLLECTION=aic2026-clips-siglip2-so400m-v1
+
+CLIP_FUSION_WEIGHT=0.5
+RERANK_ENABLED=true
+RERANK_TOP_N=30
+RERANK_MODEL=Salesforce/blip-itm-large-coco
+```
+
+Cross-encoder rerank phải có sẵn weights trong local Hugging Face cache trước
+khi thi — query path không được phép ra mạng:
+
+```bash
+python -c "
+from transformers import AutoProcessor, BlipForImageTextRetrieval
+AutoProcessor.from_pretrained('Salesforce/blip-itm-large-coco')
+BlipForImageTextRetrieval.from_pretrained('Salesforce/blip-itm-large-coco')
+"
 ```
 
 ### Windows example
