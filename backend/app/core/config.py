@@ -30,5 +30,17 @@ class Settings(BaseSettings):
     # query vector has to land in the same space, at the same dimension.
     FEATURE_PROFILE: str = "siglip2-so400m-patch14-384-v1"
 
+    # Weight of the clip index when fusing it with the frame index. 0 disables
+    # fusion and searches frames only.
+    CLIP_FUSION_WEIGHT: float = 0.5
+
+    # Cross-encoder rerank of the head of each result list. It costs one
+    # forward pass per candidate, so RERANK_TOP_N is the latency dial. The
+    # weights must be in the local Hugging Face cache before the competition:
+    # the query path is not allowed to reach the network.
+    RERANK_ENABLED: bool = True
+    RERANK_TOP_N: int = 30
+    RERANK_MODEL: str = "Salesforce/blip-itm-large-coco"
+
 
 settings = Settings()

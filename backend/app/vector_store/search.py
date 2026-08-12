@@ -24,6 +24,10 @@ class ScoredFrame:
     start_frame: int | None
     end_frame: int | None
     path: str | None
+    # Clip points only: reranking has to decode the shot back out of the
+    # source video, and that needs timestamps, not frame indexes.
+    start_sec: float | None = None
+    end_sec: float | None = None
 
     @property
     def representative_frame(self) -> int:
@@ -87,8 +91,14 @@ def _to_scored_frame(point) -> ScoredFrame:
         start_frame=_optional_int(payload.get("start_frame")),
         end_frame=_optional_int(payload.get("end_frame")),
         path=payload.get("path"),
+        start_sec=_optional_float(payload.get("start_sec")),
+        end_sec=_optional_float(payload.get("end_sec")),
     )
 
 
 def _optional_int(value) -> int | None:
     return None if value is None else int(value)
+
+
+def _optional_float(value) -> float | None:
+    return None if value is None else float(value)
