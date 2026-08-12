@@ -20,8 +20,15 @@ class Settings(BaseSettings):
     QDRANT_API_KEY: Optional[str] = None
     QDRANT_COLLECTION_NAME: str = "aic2026"
     QDRANT_BATCH_SIZE: int = 256
-    
-    # QDRANT_VECTOR_SIZE: int = 1048
-    
+
+    # Collections are versioned per ingestion run, so these name whichever
+    # build the API should serve. Ingestion never writes to the active one.
+    QDRANT_FRAMES_COLLECTION: str = "aic2026-frames-v1"
+    QDRANT_CLIPS_COLLECTION: Optional[str] = None
+
+    # Must match the profile the active collection was ingested with: the
+    # query vector has to land in the same space, at the same dimension.
+    FEATURE_PROFILE: str = "siglip2-so400m-patch14-384-v1"
+
 
 settings = Settings()

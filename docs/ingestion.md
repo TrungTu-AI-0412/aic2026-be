@@ -5,6 +5,9 @@ version. This is **not** a public upload API — data is copied/mounted onto
 local storage out-of-band, and the API only creates the job that turns a
 manifest into a collection.
 
+For deploying already-built collections without recomputing embeddings, see
+[Qdrant deployment and snapshot hand-off](qdrant-operations.md).
+
 Each time data or the embedding model changes, ingestion builds a **new**
 collection rather than mutating an existing one. The best collection is
 then picked for serving via config/alias once it has been evaluated
@@ -38,6 +41,100 @@ convention is decided).
 (for `progress.total`), `validate_columns` (required columns present), and
 `iter_rows` (streamed row-by-row for `upsert_points`). It depends on
 `pyarrow`, added to `requirements.txt` for this.
+
+## Embedding design choices
+
+The frame, clip, and text-query vectors must come from the same feature
+profile. A collection built with one profile must therefore be queried with
+`app.features.multimodal.embed_text` using that exact profile; dimensions
+alone are not enough to make vectors from different models comparable.
+
+Embedding concerns are kept outside the ingestion orchestrator:
+
+- `app/features/profiles.py` owns versioned model identifiers, dimensions,
+  clip sampling limits, and inference batch sizes.
+- `app/features/media.py` owns image decoding, video seeking, and clip-frame
+  sampling.
+- `app/features/multimodal.py` owns model loading, image/text inference,
+  normalization, and pooling without depending on ingestion schemas.
+- `app/ingestion/embedder.py` is the boundary adapter that maps frame/clip
+  manifest rows to generic feature-layer inputs.
+- `app/ingestion/pipeline.py` only coordinates manifest iteration, collection
+  creation, point construction, batched upsert, and progress reporting.
+
+The recommended accuracy-first profile is
+`siglip2-giant-opt-patch16-384-v1`. It uses the multilingual SigLIP 2 Giant
+image and text encoders, whose outputs share a 1,536-dimensional retrieval
+space. `siglip2-so400m-patch14-384-v1` is the lower-memory alternative, while
+`clip-b32-v1` remains for compatibility and cheap experiments. Changing a
+profile requires a new versioned collection.
+
+### Keyframe embedding
+
+A keyframe manifest row points to one JPEG/PNG. Ingestion decodes that file to
+RGB and passes the pixels to the checkpoint's `AutoProcessor`, which applies
+the model-specific resize and pixel preprocessing. The image encoder then
+produces one feature vector, which is L2-normalized before it is stored.
+
+Pixel preprocessing and L2 feature normalization are separate operations:
+the image is fed to the model first, and only the model output is
+L2-normalized. For an embedding `v`, the stored vector is:
+
+```text
+v_unit = v / ||v||₂
+```
+
+Retrieval is based on vector direction rather than uncontrolled differences
+in output magnitude. Because both stored image vectors and query-text vectors
+have unit length, their dot product equals cosine similarity. Qdrant is also
+configured with cosine distance, but normalizing before storage preserves the
+same invariant for offline evaluation and detects zero or invalid vectors
+before an upsert.
+
+### Clip embedding
+
+A clip manifest row represents one inclusive shot range in a source video; it
+does not point to a separately encoded clip file. It supplies `path`,
+`start_frame`, `end_frame`, `start_sec`, and `end_sec`. Ingestion performs the
+following steps:
+
+1. Choose up to eight timestamps uniformly across `[start_sec, end_sec]`. A
+   shot containing fewer than eight source frames uses its actual frame count.
+2. Seek backward to the nearest decodable video keyframe, then decode forward
+   into the requested range. Video codecs generally cannot begin decoding at
+   an arbitrary inter-frame without its preceding references.
+3. Select RGB frames as decoding crosses the target timestamps, allowing a
+   half-frame tolerance for container time-base and floating-point rounding.
+4. Encode the sampled frames in small image batches with the same image encoder
+   used for standalone keyframes.
+5. L2-normalize each frame feature, mean-pool the frame features, and
+   L2-normalize the pooled result:
+
+```text
+nᵢ = frame_embeddingᵢ / ||frame_embeddingᵢ||₂
+clip_raw = mean(n₁, n₂, ..., nₖ)
+clip_embedding = clip_raw / ||clip_raw||₂
+```
+
+Normalizing each frame before pooling gives every sampled moment equal weight;
+otherwise a frame with a larger feature norm could dominate the clip for a
+reason unrelated to semantic relevance. The final normalization makes the
+pooled vector directly comparable with normalized text queries under cosine
+similarity.
+
+Uniform sampling plus mean pooling was chosen as a bounded-cost baseline for
+shot-level semantic retrieval. It covers the beginning, middle, and end of a
+shot, keeps each shot to one Qdrant point, and remains in SigLIP's shared
+image-text space. Eight frames is a quality/cost default, not a claim of a
+universally optimal sample count.
+
+This representation is intentionally order-insensitive. It is suitable for
+queries about objects, people, places, and scene content, but it does not model
+motion direction or distinguish action order such as `A then B` from `B then
+A`. Brief events can also be diluted by mean pooling. If temporal retrieval
+becomes a benchmark bottleneck, evaluate per-frame multi-vectors, max-similarity
+aggregation, or a dedicated video-text encoder rather than silently changing
+this collection contract.
 
 ## Endpoints
 
@@ -132,8 +229,8 @@ GET /api/v1/ingestions/{job_id} just reads that SQLite row
   profile `siglip2-giant-opt-patch16-384-v1` uses the multilingual SigLIP 2
   Giant checkpoint. Keyframes are embedded directly; clips are represented by
   up to eight uniformly sampled frames, normalized and mean-pooled in the same
-  vector space used by `pipeline.embed_text`. The So400m and CLIP B/32 profiles
-  remain available when ingestion memory is constrained.
+  vector space used by `app.features.multimodal.embed_text`. The So400m and
+  CLIP B/32 profiles remain available when ingestion memory is constrained.
 - Model weights must be downloaded into the local Hugging Face cache before
   an offline competition run. The SigLIP 2 Giant checkpoint is roughly 7.5 GB,
   and GPU inference is strongly recommended.

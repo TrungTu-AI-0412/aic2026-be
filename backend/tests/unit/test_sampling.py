@@ -275,7 +275,9 @@ class TestBuildKeyframeManifest:
         videos_manifest = tmp_path / "videos.parquet"
         shots_manifest = tmp_path / "shots.parquet"
         probe.probe_directory(tmp_path / "videos", str(videos_manifest))
-        shot_detect.build_shot_manifest(str(videos_manifest), str(shots_manifest))
+        shot_detect.build_shot_manifest(
+            str(videos_manifest), str(shots_manifest), detector="content"
+        )
         return videos_manifest, shots_manifest
 
     def test_writes_a_manifest_the_ingestion_layer_accepts(self, tmp_path):
