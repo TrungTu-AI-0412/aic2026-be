@@ -213,17 +213,38 @@ def iter_video_rows(manifest_path: str) -> Iterator[VideoManifestRow]:
     yield from _iter_as(manifest_path, VideoManifestRow)
 
 
+def existing_video_ids(manifest_path: str) -> set[str]:
+    """`video_id`s already recorded in a manifest; empty when there is no file.
+
+    This is what lets a stage be re-run over a bigger slice of the dataset
+    without redoing the videos an earlier, smaller run already covered.
+    """
+    if not Path(manifest_path).is_file():
+        return set()
+    column = pq.read_table(manifest_path, columns=["video_id"]).column("video_id")
+    return set(column.to_pylist())
+
+
 def write_rows(
-    rows: Iterable[BaseModel], out_path: str, schema: pa.Schema
+    rows: Iterable[BaseModel], out_path: str, schema: pa.Schema, append: bool = False
 ) -> int:
-    """Write rows with an explicit Arrow schema.
+    """Write rows with an explicit Arrow schema, returning the manifest size.
 
     The schema is passed rather than inferred so that all-null optional
     columns keep their declared type instead of collapsing to null.
+
+    Appending rewrites the whole file from the old rows plus the new ones.
+    Parquet cannot extend a file in place, and a manifest of a few million
+    rows is small enough that rewriting it costs less than the row-group
+    bookkeeping needed to avoid it.
     """
     records = [row.model_dump() for row in rows]
     table = pa.Table.from_pylist(records, schema=schema)
     out = Path(out_path)
+
+    if append and out.is_file():
+        table = pa.concat_tables([pq.read_table(out, schema=schema), table])
+
     out.parent.mkdir(parents=True, exist_ok=True)
     pq.write_table(table, out)
     return table.num_rows
