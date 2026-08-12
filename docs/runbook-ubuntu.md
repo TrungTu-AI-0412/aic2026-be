@@ -136,6 +136,22 @@ INGESTION_DB_PATH=/opt/aic2026/data/ingestion.db
 FEATURE_PROFILE=siglip2-so400m-patch14-384-v1
 QDRANT_FRAMES_COLLECTION=aic2026-frames-siglip2-so400m-v1
 QDRANT_CLIPS_COLLECTION=aic2026-clips-siglip2-so400m-v1
+
+CLIP_FUSION_WEIGHT=0.5
+RERANK_ENABLED=true
+RERANK_TOP_N=30
+RERANK_MODEL=Salesforce/blip-itm-large-coco
+```
+
+Cross-encoder rerank phải có sẵn weights trong local Hugging Face cache trước
+khi thi — query path không được phép ra mạng:
+
+```bash
+python -c "
+from transformers import AutoProcessor, BlipForImageTextRetrieval
+AutoProcessor.from_pretrained('Salesforce/blip-itm-large-coco')
+BlipForImageTextRetrieval.from_pretrained('Salesforce/blip-itm-large-coco')
+"
 ```
 
 Các nguyên tắc quan trọng:
@@ -144,6 +160,10 @@ Các nguyên tắc quan trọng:
 - `INGESTION_DATA_ROOT` phải là absolute path và mọi manifest được gửi vào
   ingestion API phải nằm bên trong thư mục này.
 - `FEATURE_PROFILE` phải giống chính xác profile dùng khi ingest collection.
+- `RERANK_TOP_N` là dial latency: ~19ms mỗi candidate. `RERANK_ENABLED=false`
+  tắt hẳn giai đoạn 2 nếu cần query dưới 50ms.
+- `QDRANT_CLIPS_COLLECTION` trỏ tới collection chưa ingest sẽ làm mọi query
+  lỗi; bỏ trống biến này để search frames-only.
 - Mỗi lần thay dataset hoặc model phải dùng tên collection versioned mới.
 - Không đổi `QDRANT_BIND_ADDRESS` thành `0.0.0.0` nếu chưa có firewall, TLS và
   lý do rõ ràng để expose Qdrant.

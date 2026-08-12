@@ -9,7 +9,7 @@ import time
 from dataclasses import dataclass, field
 
 from app.features.multimodal import embed_text
-from app.ranking import dedupe
+from app.ranking import dedupe, fusion, rerank
 from app.vector_store.client import get_qdrant_client
 from app.vector_store.search import ScoredFrame, build_filter, search
 
@@ -33,6 +33,10 @@ class RetrievalConfig:
     frames_collection: str
     feature_profile: str
     clips_collection: str | None = None
+    clip_weight: float = fusion.DEFAULT_CLIP_WEIGHT
+    rerank_enabled: bool = True
+    rerank_top_n: int = rerank.DEFAULT_TOP_N
+    rerank_model: str = rerank.DEFAULT_MODEL
 
 
 def encode_query(text: str, config: RetrievalConfig, timings: Timings) -> list[float]:
@@ -50,23 +54,57 @@ def search_vector(
     timings: Timings,
     video_ids: list[str] | None = None,
 ) -> list[ScoredFrame]:
+    """Search the frame index, fused with the clip index when one is set."""
     started = time.perf_counter()
     try:
-        return search(
-            get_qdrant_client(),
+        client = get_qdrant_client()
+        limit = dedupe.overfetch_limit(top_k)
+        query_filter = build_filter(video_ids=video_ids)
+        frames = search(
+            client,
             config.frames_collection,
             vector,
-            limit=dedupe.overfetch_limit(top_k),
-            query_filter=build_filter(video_ids=video_ids),
+            limit=limit,
+            query_filter=query_filter,
+        )
+        if not config.clips_collection:
+            return frames
+        clips = search(
+            client,
+            config.clips_collection,
+            vector,
+            limit=limit,
+            query_filter=query_filter,
         )
     finally:
         timings.record("qdrant", started)
 
-
-def rank(frames: list[ScoredFrame], top_k: int, timings: Timings) -> list[ScoredFrame]:
     started = time.perf_counter()
     try:
-        return dedupe.dedupe_by_shot(frames, top_k)
+        return fusion.fuse_frames_and_clips(frames, clips, config.clip_weight)
+    finally:
+        timings.record("fuse", started)
+
+
+def rank(
+    frames: list[ScoredFrame],
+    text: str,
+    top_k: int,
+    config: RetrievalConfig,
+    timings: Timings,
+) -> list[ScoredFrame]:
+    started = time.perf_counter()
+    try:
+        hits = dedupe.dedupe_by_shot(frames, top_k)
+    finally:
+        timings.record("dedupe", started)
+
+    if not config.rerank_enabled or not hits:
+        return hits
+
+    started = time.perf_counter()
+    try:
+        return rerank.rerank(text, hits, config.rerank_top_n, config.rerank_model)
     finally:
         timings.record("rerank", started)
 
@@ -78,7 +116,7 @@ def retrieve(
     timings: Timings,
     video_ids: list[str] | None = None,
 ) -> list[ScoredFrame]:
-    """Encode one text query and return deduplicated, ranked hits."""
+    """Encode one text query and return deduplicated, reranked hits."""
     vector = encode_query(text, config, timings)
     hits = search_vector(vector, top_k, config, timings, video_ids)
-    return rank(hits, top_k, timings)
+    return rank(hits, text, top_k, config, timings)
