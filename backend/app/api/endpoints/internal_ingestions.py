@@ -4,6 +4,7 @@ from app.api.deps import get_ingestion_service
 from app.schemas.ingestions import (
     CreateIngestionJobRequest,
     CreateIngestionJobResponse,
+    IngestionFeatureProfilesResponse,
     IngestionJobListResponse,
     IngestionJobStatusResponse,
 )
@@ -12,9 +13,20 @@ from app.services.ingestions import (
     IngestionJobNotFoundError,
     IngestionService,
     ManifestPathNotAllowedError,
+    UnsupportedFeatureProfileError,
 )
 
 router = APIRouter()
+
+
+@router.get(
+    "/feature-profiles",
+    response_model=IngestionFeatureProfilesResponse,
+)
+async def list_ingestion_feature_profiles(
+    ingestion_service: IngestionService = Depends(get_ingestion_service),
+) -> IngestionFeatureProfilesResponse:
+    return await ingestion_service.list_feature_profiles()
 
 
 @router.post(
@@ -32,6 +44,8 @@ async def create_ingestion_job(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except CollectionAlreadyExistsError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except UnsupportedFeatureProfileError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("", response_model=IngestionJobListResponse)

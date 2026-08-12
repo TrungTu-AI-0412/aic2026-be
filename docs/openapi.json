@@ -374,6 +374,27 @@
         }
       }
     },
+    "/api/v1/ingestions/feature-profiles": {
+      "get": {
+        "tags": [
+          "Ingestion"
+        ],
+        "summary": "List Ingestion Feature Profiles",
+        "operationId": "list_ingestion_feature_profiles_api_v1_ingestions_feature_profiles_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IngestionFeatureProfilesResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/ingestions": {
       "get": {
         "tags": [
@@ -601,6 +622,42 @@
         ],
         "title": "ExportRequest"
       },
+      "FeatureProfileOption": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "model_id": {
+            "type": "string",
+            "title": "Model Id"
+          },
+          "dimension": {
+            "type": "integer",
+            "exclusiveMinimum": 0.0,
+            "title": "Dimension"
+          },
+          "clip_frame_count": {
+            "type": "integer",
+            "exclusiveMinimum": 0.0,
+            "title": "Clip Frame Count"
+          },
+          "image_batch_size": {
+            "type": "integer",
+            "exclusiveMinimum": 0.0,
+            "title": "Image Batch Size"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "model_id",
+          "dimension",
+          "clip_frame_count",
+          "image_batch_size"
+        ],
+        "title": "FeatureProfileOption"
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -621,6 +678,27 @@
           "clips"
         ],
         "title": "IngestionEntity"
+      },
+      "IngestionFeatureProfilesResponse": {
+        "properties": {
+          "profiles": {
+            "items": {
+              "$ref": "#/components/schemas/FeatureProfileOption"
+            },
+            "type": "array",
+            "title": "Profiles"
+          },
+          "default_profile": {
+            "type": "string",
+            "title": "Default Profile"
+          }
+        },
+        "type": "object",
+        "required": [
+          "profiles",
+          "default_profile"
+        ],
+        "title": "IngestionFeatureProfilesResponse"
       },
       "IngestionJobListResponse": {
         "properties": {

@@ -37,6 +37,19 @@ class CreateIngestionJobResponse(BaseModel):
     collection_name: str
 
 
+class FeatureProfileOption(BaseModel):
+    name: str
+    model_id: str
+    dimension: int = Field(gt=0)
+    clip_frame_count: int = Field(gt=0)
+    image_batch_size: int = Field(gt=0)
+
+
+class IngestionFeatureProfilesResponse(BaseModel):
+    profiles: list[FeatureProfileOption]
+    default_profile: str
+
+
 class IngestionProgress(BaseModel):
     completed: int = Field(ge=0)
     total: int = Field(ge=0)
