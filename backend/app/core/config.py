@@ -16,4 +16,7 @@ class Settings(BaseSettings):
     INGESTION_DATA_ROOT: str = "./data"
     INGESTION_DB_PATH: str = "./data/ingestion.db"
 
+    QDRANT_URL: str = "http://localhost:6333"
+    QDRANT_API_KEY: Optional[str] = None
+
 settings = Settings()
