@@ -5,10 +5,14 @@ from pathlib import Path
 from uuid import uuid4
 
 from app.core.config import settings
+from app.features.errors import UnknownFeatureProfileError
+from app.features.profiles import FEATURE_PROFILES, get_profile
 from app.ingestion import store
 from app.schemas.ingestions import (
     CreateIngestionJobRequest,
     CreateIngestionJobResponse,
+    FeatureProfileOption,
+    IngestionFeatureProfilesResponse,
     IngestionJobStatusResponse,
     IngestionProgress,
 )
@@ -16,6 +20,7 @@ from app.services.ingestions import (
     CollectionAlreadyExistsError,
     IngestionJobNotFoundError,
     ManifestPathNotAllowedError,
+    UnsupportedFeatureProfileError,
 )
 
 
@@ -46,9 +51,29 @@ class SqliteIngestionService:
         self._db_path = db_path
         self._data_root = Path(data_root).resolve()
 
+    async def list_feature_profiles(self) -> IngestionFeatureProfilesResponse:
+        return IngestionFeatureProfilesResponse(
+            profiles=[
+                FeatureProfileOption(
+                    name=name,
+                    model_id=profile.model_id,
+                    dimension=profile.dimension,
+                    clip_frame_count=profile.clip_frame_count,
+                    image_batch_size=profile.image_batch_size,
+                )
+                for name, profile in sorted(FEATURE_PROFILES.items())
+            ],
+            default_profile=settings.FEATURE_PROFILE,
+        )
+
     async def create_job(
         self, request: CreateIngestionJobRequest
     ) -> CreateIngestionJobResponse:
+        try:
+            get_profile(request.feature_profile)
+        except UnknownFeatureProfileError as exc:
+            raise UnsupportedFeatureProfileError(str(exc)) from exc
+
         manifest_path = Path(request.manifest_path).resolve()
         if not manifest_path.is_relative_to(self._data_root):
             raise ManifestPathNotAllowedError(
