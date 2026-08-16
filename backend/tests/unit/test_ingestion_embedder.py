@@ -8,6 +8,7 @@ def keyframe(path: str) -> manifest.KeyframeManifestRow:
     return manifest.KeyframeManifestRow(
         video_id="L01_V001",
         shot_id=2,
+        keyframe_n=1,
         original_frame_id=12,
         pts_sec=0.48,
         path=path,

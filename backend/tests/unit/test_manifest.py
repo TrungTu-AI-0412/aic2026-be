@@ -12,6 +12,7 @@ def _keyframe(**overrides) -> manifest.KeyframeManifestRow:
     values = {
         "video_id": "L01_V001",
         "shot_id": 3,
+        "keyframe_n": 12,
         "original_frame_id": 415,
         "pts_sec": 16.6,
         "path": "/data/keyframes/L01_V001/000415.jpg",
@@ -50,14 +51,26 @@ def _video(**overrides) -> manifest.VideoManifestRow:
 
 
 class TestKeyframeRowMapping:
-    def test_point_parts_use_original_frame_id(self):
-        assert _keyframe().point_parts() == ("L01_V001", "415")
+    def test_point_parts_use_keyframe_n(self):
+        assert _keyframe().point_parts() == ("L01_V001", "kf12")
+
+    def test_keyframes_sharing_a_frame_id_stay_distinct_points(self):
+        """Two keyframes can round to the same `original_frame_id`.
+
+        The organiser's `map-keyframes` does exactly this in 192 of 873
+        videos. Identity must come from `keyframe_n`, or the second keyframe
+        silently overwrites the first during upsert.
+        """
+        first = _keyframe(keyframe_n=1, original_frame_id=0, pts_sec=0.0)
+        second = _keyframe(keyframe_n=2, original_frame_id=0, pts_sec=0.033)
+        assert first.point_parts() != second.point_parts()
 
     def test_payload_carries_shot_id_for_scene_dedupe(self):
         payload = _keyframe().payload()
         assert payload == {
             "video_id": "L01_V001",
             "shot_id": 3,
+            "keyframe_n": 12,
             "original_frame_id": 415,
             "pts_sec": 16.6,
             "path": "/data/keyframes/L01_V001/000415.jpg",
@@ -66,6 +79,58 @@ class TestKeyframeRowMapping:
     def test_negative_original_frame_id_is_rejected(self):
         with pytest.raises(ValidationError):
             _keyframe(original_frame_id=-1)
+
+    def test_keyframe_n_must_be_positive(self):
+        with pytest.raises(ValidationError):
+            _keyframe(keyframe_n=0)
+
+
+class TestEnrichmentPayload:
+    def test_enrichment_reaches_the_payload(self):
+        payload = _keyframe(
+            objects=["Person", "Boat"],
+            asr_text="xin chào",
+            asr_entities=["Hà Nội"],
+            publish_date="01/08/2024",
+        ).payload()
+
+        assert payload["objects"] == ["Person", "Boat"]
+        assert payload["asr_text"] == "xin chào"
+        assert payload["asr_entities"] == ["Hà Nội"]
+        assert payload["publish_date"] == "01/08/2024"
+
+    def test_absent_enrichment_leaves_the_payload_minimal(self):
+        """Empty values are dropped rather than indexed as matchless terms."""
+        payload = _keyframe().payload()
+
+        assert set(payload) == {
+            "video_id",
+            "shot_id",
+            "keyframe_n",
+            "original_frame_id",
+            "pts_sec",
+            "path",
+        }
+
+    def test_clips_carry_enrichment_too(self):
+        payload = _clip(asr_text="bản tin", objects=["Person"]).payload()
+
+        assert payload["asr_text"] == "bản tin"
+        assert payload["objects"] == ["Person"]
+
+    def test_a_manifest_without_enrichment_columns_still_validates(self):
+        """Manifests written before enrichment existed must keep working."""
+        row = manifest.KeyframeManifestRow(
+            video_id="L01_V001",
+            shot_id=1,
+            keyframe_n=1,
+            original_frame_id=0,
+            pts_sec=0.0,
+            path="/data/k.jpg",
+        )
+
+        assert row.objects == []
+        assert row.asr_text == ""
 
 
 class TestClipRowMapping:
@@ -186,3 +251,66 @@ class TestColumnValidation:
         assert "original_frame_id" in frames
         assert "original_frame_id" not in clips
         assert {"video_id", "shot_id", "path"} <= frames & clips
+
+
+class TestArrowMapColumns:
+    BASE = {
+        "video_id": "L21_V001",
+        "shot_id": 0,
+        "keyframe_n": 1,
+        "original_frame_id": 0,
+        "pts_sec": 0.0,
+        "path": "keyframes/L21_V001/001.jpg",
+    }
+
+    def test_object_counts_accepts_arrows_pair_list(self) -> None:
+        """`RecordBatch.to_pylist()` renders `map<string,int32>` as pairs.
+
+        It does not rebuild a dict, so every manifest carrying object_counts
+        failed validation on its first row and ingestion never started.
+        """
+        row = manifest.KeyframeManifestRow.model_validate(
+            {**self.BASE, "object_counts": [("Person", 2), ("Boat", 1)]}
+        )
+
+        assert row.object_counts == {"Person": 2, "Boat": 1}
+
+    def test_a_plain_dict_still_validates(self) -> None:
+        row = manifest.KeyframeManifestRow.model_validate(
+            {**self.BASE, "object_counts": {"Person": 2}}
+        )
+
+        assert row.object_counts == {"Person": 2}
+
+
+class TestOcrEnrichment:
+    BASE = {
+        "video_id": "L21_V001",
+        "shot_id": 0,
+        "keyframe_n": 1,
+        "original_frame_id": 0,
+        "pts_sec": 0.0,
+        "path": "keyframes/L21_V001/001.jpg",
+    }
+
+    def test_ocr_text_is_kept_verbatim(self) -> None:
+        """Undiacriticked all-caps ticker text must not be normalised here.
+
+        `app.features.sparse` folds diacritics at encode time, so the raw form
+        still answers a query typed with them. Normalising at ingest would
+        discard the original with nothing gained.
+        """
+        row = manifest.KeyframeManifestRow.model_validate(
+            {**self.BASE, "ocr_text": "Tam DUnG LuU Thong", "ocr_regions": 4}
+        )
+
+        assert row.ocr_text == "Tam DUnG LuU Thong"
+        assert row.enrichment_payload()["ocr_text"] == "Tam DUnG LuU Thong"
+
+    def test_a_shot_with_no_on_screen_text_writes_no_ocr_payload(self) -> None:
+        row = manifest.KeyframeManifestRow.model_validate(self.BASE)
+
+        assert "ocr_text" not in row.enrichment_payload()
+
+    def test_manifests_predating_ocr_still_validate(self) -> None:
+        assert manifest.KeyframeManifestRow.model_validate(self.BASE).ocr_text == ""
