@@ -5,6 +5,19 @@ from qdrant_client.http import models as qmodels
 
 DEFAULT_DISTANCE = qmodels.Distance.COSINE
 
+# Named vectors, so a collection can hold the image embedding and the lexical
+# signals side by side on one point and a single query can fuse them.
+DENSE_VECTOR_NAME = "dense"
+
+# All three lexical slots are declared at creation time even though only
+# `speech` is populated today. Qdrant cannot add a vector to an existing
+# collection, so declaring `ocr` and `caption` now is what makes those a
+# re-upsert later instead of a full re-ingest of 177k images.
+SPARSE_SPEECH = "speech"
+SPARSE_OCR = "ocr"
+SPARSE_CAPTION = "caption"
+SPARSE_VECTOR_NAMES = (SPARSE_SPEECH, SPARSE_OCR, SPARSE_CAPTION)
+
 # Qdrant's own default. Restored after a bulk load to let the HNSW index build.
 DEFAULT_INDEXING_THRESHOLD = 20_000
 
@@ -35,6 +48,10 @@ def create_collection(
     """Create a collection, by default with indexing deferred for bulk load.
 
     `optimize_collection` restores the threshold once every point is in.
+
+    The dense vector is named rather than anonymous, and the sparse slots use
+    Qdrant's IDF modifier so lexical scoring is BM25-equivalent with the
+    corpus statistics computed server-side.
     """
     optimizers_config = (
         None
@@ -43,7 +60,17 @@ def create_collection(
     )
     client.create_collection(
         collection_name=collection_name,
-        vectors_config=qmodels.VectorParams(size=vector_size, distance=distance),
+        vectors_config={
+            DENSE_VECTOR_NAME: qmodels.VectorParams(
+                size=vector_size, distance=distance
+            )
+        },
+        sparse_vectors_config={
+            name: qmodels.SparseVectorParams(
+                modifier=qmodels.Modifier.IDF,
+            )
+            for name in SPARSE_VECTOR_NAMES
+        },
         optimizers_config=optimizers_config,
     )
 

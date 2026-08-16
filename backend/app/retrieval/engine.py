@@ -8,7 +8,9 @@ assemble the final answer; they never re-implement the search itself.
 import time
 from dataclasses import dataclass, field
 
+from app.features import sparse
 from app.features.multimodal import embed_text
+from app.features.sparse import SparseVector
 from app.ranking import dedupe, fusion, rerank
 from app.vector_store.client import get_qdrant_client
 from app.vector_store.search import ScoredFrame, build_filter, search
@@ -37,6 +39,10 @@ class RetrievalConfig:
     rerank_enabled: bool = True
     rerank_top_n: int = rerank.DEFAULT_TOP_N
     rerank_model: str = rerank.DEFAULT_MODEL
+    # Off for collections ingested before the lexical vectors existed: they
+    # have no sparse slots, and a prefetch against a vector the collection
+    # does not declare fails the whole query rather than degrading.
+    hybrid_enabled: bool = True
 
 
 def encode_query(text: str, config: RetrievalConfig, timings: Timings) -> list[float]:
@@ -47,12 +53,28 @@ def encode_query(text: str, config: RetrievalConfig, timings: Timings) -> list[f
         timings.record("encode", started)
 
 
+def encode_query_sparse(
+    text: str, config: RetrievalConfig
+) -> SparseVector | None:
+    """Lexical form of the query, or None when hybrid search is off.
+
+    Not timed as its own stage: tokenising a query string is microseconds
+    against a transformer forward pass, and a timing entry that always reads
+    0.0 is noise in every response.
+    """
+    if not config.hybrid_enabled:
+        return None
+    encoded = sparse.encode(text)
+    return encoded or None
+
+
 def search_vector(
     vector: list[float],
     top_k: int,
     config: RetrievalConfig,
     timings: Timings,
     video_ids: list[str] | None = None,
+    sparse_query: SparseVector | None = None,
 ) -> list[ScoredFrame]:
     """Search the frame index, fused with the clip index when one is set."""
     started = time.perf_counter()
@@ -66,6 +88,7 @@ def search_vector(
             vector,
             limit=limit,
             query_filter=query_filter,
+            sparse_query=sparse_query,
         )
         if not config.clips_collection:
             return frames
@@ -75,6 +98,7 @@ def search_vector(
             vector,
             limit=limit,
             query_filter=query_filter,
+            sparse_query=sparse_query,
         )
     finally:
         timings.record("qdrant", started)
@@ -118,5 +142,6 @@ def retrieve(
 ) -> list[ScoredFrame]:
     """Encode one text query and return deduplicated, reranked hits."""
     vector = encode_query(text, config, timings)
-    hits = search_vector(vector, top_k, config, timings, video_ids)
+    sparse_query = encode_query_sparse(text, config)
+    hits = search_vector(vector, top_k, config, timings, video_ids, sparse_query)
     return rank(hits, text, top_k, config, timings)
