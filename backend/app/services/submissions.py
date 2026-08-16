@@ -18,7 +18,6 @@ class VideoNotFoundError(Exception):
 class FrameOutOfBoundsError(Exception):
     pass
 
-#TODO
 class SubmissionService(Protocol):
     async def export(self, request: ExportRequest) -> ExportFile:
         ...
