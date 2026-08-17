@@ -1,6 +1,13 @@
 .env
+.env.*
+!.env.example
+kaggle.json*
 __pycache__/
 venv/
+.venv*/
+.DS_Store
 data/*
+# The artefact reference is documentation, not data.
+!data/ARTIFACTS.md
 artifacts/
 *.npy

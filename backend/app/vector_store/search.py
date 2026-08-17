@@ -5,10 +5,14 @@ the query call itself. Callers receive plain dataclasses so ranking and the
 API layer never import Qdrant types.
 """
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as qmodels
+
+from app.features.sparse import SparseVector
+from app.vector_store import collections
 
 DEFAULT_LIMIT = 100
 
@@ -70,14 +74,66 @@ def search(
     vector: list[float],
     limit: int = DEFAULT_LIMIT,
     query_filter: qmodels.Filter | None = None,
+    sparse_query: SparseVector | None = None,
+    sparse_names: Sequence[str] = (
+        collections.SPARSE_SPEECH,
+        collections.SPARSE_OCR,
+    ),
 ) -> list[ScoredFrame]:
-    response = client.query_points(
-        collection_name=collection_name,
-        query=vector,
-        limit=limit,
-        query_filter=query_filter,
-        with_payload=True,
-    )
+    """Dense search, fused with lexical search when the query has terms.
+
+    With no sparse query this is a plain dense lookup, which keeps the path
+    unchanged for collections that predate the lexical vectors.
+
+    With one, each branch runs as a prefetch and Qdrant fuses them with
+    Reciprocal Rank Fusion. RRF combines *ranks*, not scores, which matters
+    here because a cosine similarity and an IDF-weighted lexical score have no
+    common scale — a weighted sum of the two would be dominated by whichever
+    happens to have the wider range on a given query.
+
+    `sparse_names` covers the slots that hold vectors, not every declared one.
+    `caption` stays out: the collection declares it so it can be filled by a
+    later re-upsert, but querying a slot no point carries is wasted work
+    against a server and raises outright against the in-memory client, which
+    only registers a slot's IDF statistics once a point uses it. Narrow this
+    argument when ingesting a manifest that predates OCR.
+    """
+    if sparse_query:
+        prefetch = [
+            qmodels.Prefetch(
+                query=vector,
+                using=collections.DENSE_VECTOR_NAME,
+                limit=limit,
+                filter=query_filter,
+            )
+        ]
+        prefetch += [
+            qmodels.Prefetch(
+                query=qmodels.SparseVector(
+                    indices=sparse_query.indices, values=sparse_query.values
+                ),
+                using=name,
+                limit=limit,
+                filter=query_filter,
+            )
+            for name in sparse_names
+        ]
+        response = client.query_points(
+            collection_name=collection_name,
+            prefetch=prefetch,
+            query=qmodels.FusionQuery(fusion=qmodels.Fusion.RRF),
+            limit=limit,
+            with_payload=True,
+        )
+    else:
+        response = client.query_points(
+            collection_name=collection_name,
+            query=vector,
+            using=collections.DENSE_VECTOR_NAME,
+            limit=limit,
+            query_filter=query_filter,
+            with_payload=True,
+        )
     return [_to_scored_frame(point) for point in response.points]
 
 
