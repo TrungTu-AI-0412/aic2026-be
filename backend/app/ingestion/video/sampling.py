@@ -243,6 +243,7 @@ def sample_video(
                         KeyframeManifestRow(
                             video_id=video.video_id,
                             shot_id=current.shot_id,
+                            keyframe_n=len(rows) + 1,
                             original_frame_id=best_index,
                             pts_sec=best_index / rate,
                             path=str(destination),

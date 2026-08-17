@@ -42,5 +42,10 @@ class Settings(BaseSettings):
     RERANK_TOP_N: int = 30
     RERANK_MODEL: str = "Salesforce/blip-itm-large-coco"
 
+    # Per-video frame bounds used to reject a submission row that could never
+    # score. Defaults to video_bounds.parquet under INGESTION_DATA_ROOT; when
+    # the file is missing the export still works, just without the check.
+    SUBMISSION_BOUNDS_PATH: Optional[str] = None
+
 
 settings = Settings()

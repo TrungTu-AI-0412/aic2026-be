@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from pathlib import Path
 
 from app.core.config import Settings
 from app.ingestion.service import SqliteIngestionService
@@ -8,6 +9,7 @@ from app.services.ingestions import IngestionService
 from app.services.media import LocalMediaService, MediaService
 from app.services.search import SearchService
 from app.services.submissions import SubmissionService
+from app.submissions.service import LocalSubmissionService
 
 
 @dataclass
@@ -15,7 +17,7 @@ class Container:
     search_service: SearchService
     ingestion_service: IngestionService
     media_service: MediaService
-    submission_service: SubmissionService | None = None
+    submission_service: SubmissionService
 
     async def close(self) -> None:
         pass
@@ -39,4 +41,8 @@ async def build_container(settings: Settings) -> Container:
             data_root=settings.INGESTION_DATA_ROOT,
         ),
         media_service=LocalMediaService(data_root=settings.INGESTION_DATA_ROOT),
+        submission_service=LocalSubmissionService(
+            bounds_manifest=settings.SUBMISSION_BOUNDS_PATH
+            or str(Path(settings.INGESTION_DATA_ROOT) / "video_bounds.parquet")
+        ),
     )
