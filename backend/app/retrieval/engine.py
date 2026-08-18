@@ -43,6 +43,8 @@ class RetrievalConfig:
     # have no sparse slots, and a prefetch against a vector the collection
     # does not declare fails the whole query rather than degrading.
     hybrid_enabled: bool = True
+    sparse_method: str = "bm25"
+    splade_model: str | None = None
 
 
 def encode_query(text: str, config: RetrievalConfig, timings: Timings) -> list[float]:
@@ -58,13 +60,15 @@ def encode_query_sparse(
 ) -> SparseVector | None:
     """Lexical form of the query, or None when hybrid search is off.
 
-    Not timed as its own stage: tokenising a query string is microseconds
-    against a transformer forward pass, and a timing entry that always reads
-    0.0 is noise in every response.
+    Not timed as its own stage for BM25: tokenising a query string is microseconds
+    against a transformer forward pass.
     """
     if not config.hybrid_enabled:
         return None
-    encoded = sparse.encode(text)
+    kwargs = {}
+    if config.splade_model:
+        kwargs["model_id"] = config.splade_model
+    encoded = sparse.encode(text, method=config.sparse_method, **kwargs)
     return encoded or None
 
 

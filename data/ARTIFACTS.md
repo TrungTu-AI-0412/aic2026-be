@@ -3,8 +3,6 @@
 Dữ liệu đã xử lý, sinh từ `raw/` trên cùng bucket. Kéo về là dùng được ngay,
 không phải chạy lại bước nào.
 
-Tổng quan đã làm gì / mượn gì / còn thiếu gì: [`docs/data-pipeline.md`](../docs/data-pipeline.md).
-
 Tải:
 
 ```bash

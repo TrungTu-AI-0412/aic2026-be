@@ -100,3 +100,85 @@ class TestEncode:
 
         assert sparse.token_index("bão") in pooled.indices
         assert sparse.token_index("lụt") in pooled.indices
+
+
+class TestSplade:
+    def test_empty_input_is_falsy(self) -> None:
+        assert not sparse.encode_splade("")
+        assert not sparse.encode_splade("", "")
+        assert not sparse.encode("", method="splade")
+
+    def test_splade_mock_computation_and_sorting(self) -> None:
+        from unittest.mock import MagicMock, patch
+        import torch
+
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.return_value = {
+            "input_ids": torch.tensor([[101, 2000, 102]]),
+            "attention_mask": torch.tensor([[1, 1, 1]]),
+        }
+        mock_model = MagicMock()
+        # [batch_size=1, seq_len=3, vocab_size=5]
+        # relu(logits) will be positive for > 0, log1p will produce positive weights
+        mock_model.return_value.logits = torch.tensor(
+            [[[0.0, 1.0, -1.0, 0.5, 0.0],
+              [0.0, 0.2, 2.0, 0.0, 0.0],
+              [0.0, 0.0, 0.0, 0.0, 0.0]]]
+        )
+
+        mock_runtime = sparse._SpladeRuntime(
+            tokenizer=mock_tokenizer,
+            model=mock_model,
+            torch=torch,
+            device=torch.device("cpu"),
+        )
+        with patch("app.features.sparse._load_splade_runtime", return_value=mock_runtime):
+            vector = sparse.encode("query text", method="splade", threshold=0.1)
+
+            assert isinstance(vector, sparse.SparseVector)
+            assert vector.indices == sorted(vector.indices)
+            assert len(vector.indices) == len(vector.values)
+            assert all(v > 0.1 for v in vector.values)
+            # Token 2 had max logit 2.0 -> log(1 + 2.0) ≈ 1.0986
+            assert 2 in vector.indices
+
+    def test_multi_text_pooling(self) -> None:
+        from unittest.mock import MagicMock, patch
+        import torch
+
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.return_value = {
+            "input_ids": torch.tensor([[101, 102], [101, 102]]),
+            "attention_mask": torch.tensor([[1, 1], [1, 1]]),
+        }
+        mock_model = MagicMock()
+        # 2 texts in batch: text 1 activates token 1, text 2 activates token 3
+        mock_model.return_value.logits = torch.tensor(
+            [[[0.0, 2.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0]],
+             [[0.0, 0.0, 0.0, 3.0], [0.0, 0.0, 0.0, 0.0]]]
+        )
+
+        mock_runtime = sparse._SpladeRuntime(
+            tokenizer=mock_tokenizer,
+            model=mock_model,
+            torch=torch,
+            device=torch.device("cpu"),
+        )
+        with patch("app.features.sparse._load_splade_runtime", return_value=mock_runtime):
+            pooled = sparse.encode("text 1", "text 2", method="splade", threshold=0.01)
+            assert 1 in pooled.indices
+            assert 3 in pooled.indices
+
+
+class TestMethodSelection:
+    def test_defaults_to_bm25(self) -> None:
+        explicit_bm25 = sparse.encode("đường", method="bm25")
+        default_bm25 = sparse.encode("đường")
+        assert explicit_bm25 == default_bm25
+
+    def test_unknown_method_raises(self) -> None:
+        import pytest
+
+        with pytest.raises(ValueError, match="unknown sparse encoding method"):
+            sparse.encode("text", method="nonexistent")
+
