@@ -6,16 +6,9 @@ from app.schemas.ingestions import IngestionEntity
 _COMMON_INDEXES: dict[str, qmodels.PayloadSchemaType] = {
     "video_id": qmodels.PayloadSchemaType.KEYWORD,
     "shot_id": qmodels.PayloadSchemaType.INTEGER,
-    # Narrowing filters. During a run the operator recognises the programme or
-    # an object long before they find the exact frame, so these are the fields
-    # that convert "somewhere in 177k frames" into "somewhere in a few
-    # hundred". Without an index Qdrant falls back to a full scan of the
-    # collection for every one of them.
     "objects": qmodels.PayloadSchemaType.KEYWORD,
-    "asr_entities": qmodels.PayloadSchemaType.KEYWORD,
     "channel_id": qmodels.PayloadSchemaType.KEYWORD,
     "author": qmodels.PayloadSchemaType.KEYWORD,
-    "publish_date": qmodels.PayloadSchemaType.KEYWORD,
 }
 
 PAYLOAD_INDEXES: dict[IngestionEntity, dict[str, qmodels.PayloadSchemaType]] = {

@@ -7,7 +7,7 @@ DEFAULT_DISTANCE = qmodels.Distance.COSINE
 
 # Named vectors, so a collection can hold the image embedding and the lexical
 # signals side by side on one point and a single query can fuse them.
-DENSE_VECTOR_NAME = "dense"
+DENSE_VECTOR_NAME = "dense_video"
 
 # All three lexical slots are declared at creation time even though only
 # `speech` is populated today. Qdrant cannot add a vector to an existing

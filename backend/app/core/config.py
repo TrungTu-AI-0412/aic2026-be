@@ -1,10 +1,15 @@
+from pathlib import Path
 from typing import Dict, List, Optional
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Absolute so settings load the same whether the process starts in the repo
+# root or in backend/ (the runbook's uvicorn working directory).
+_ENV_FILE = Path(__file__).resolve().parents[3] / ".env"
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=_ENV_FILE,
         env_ignore_empty=True,
         extra="ignore",
     )
@@ -29,6 +34,10 @@ class Settings(BaseSettings):
     # Must match the profile the active collection was ingested with: the
     # query vector has to land in the same space, at the same dimension.
     FEATURE_PROFILE: str = "siglip2-so400m-patch14-384-v1"
+
+    # Sparse representation method: "bm25" or "splade"
+    SPARSE_METHOD: str = "bm25"
+    SPLADE_MODEL: str = "naver/splade-cocondenser-ensembledistil"
 
     # Weight of the clip index when fusing it with the frame index. 0 disables
     # fusion and searches frames only.
