@@ -8,12 +8,18 @@ assemble the final answer; they never re-implement the search itself.
 import time
 from dataclasses import dataclass, field
 
-from app.features import sparse
+from app.features import sparse, text as text_features
 from app.features.multimodal import embed_text
 from app.features.sparse import SparseVector
-from app.ranking import dedupe, fusion, rerank
+from app.ranking import asr, dedupe, fusion, rerank
 from app.vector_store.client import get_qdrant_client
-from app.vector_store.search import ScoredFrame, build_filter, search
+from app.vector_store.search import (
+    AsrSegment,
+    ScoredFrame,
+    build_filter,
+    search,
+    search_asr,
+)
 
 
 @dataclass
@@ -45,6 +51,21 @@ class RetrievalConfig:
     hybrid_enabled: bool = True
     sparse_method: str = "bm25"
     splade_model: str | None = None
+    # Lexical slots the frame collection actually populates. Empty by default
+    # because querying a declared-but-unfilled slot raises rather than degrading;
+    # becomes ("ocr",) once on-screen text is upserted.
+    frame_sparse_names: tuple[str, ...] = ()
+
+    # Speech overlap. A query also searches the segment collection, and each
+    # frame gains a share of the best-scoring segment that covers it in time.
+    # Unset collection or zero weight disables the stage outright.
+    asr_collection: str | None = None
+    asr_enabled: bool = True
+    asr_profile: str = "qwen3-embed-0.6b-v1"
+    asr_weight: float = asr.DEFAULT_WEIGHT
+    asr_dense_weight: float = asr.DEFAULT_DENSE_WEIGHT
+    asr_sparse_weight: float = asr.DEFAULT_SPARSE_WEIGHT
+    asr_pad_sec: float = asr.DEFAULT_PAD_SEC
 
 
 def encode_query(text: str, config: RetrievalConfig, timings: Timings) -> list[float]:
@@ -93,6 +114,7 @@ def search_vector(
             limit=limit,
             query_filter=query_filter,
             sparse_query=sparse_query,
+            sparse_names=config.frame_sparse_names,
         )
         if not config.clips_collection:
             return frames
@@ -103,6 +125,7 @@ def search_vector(
             limit=limit,
             query_filter=query_filter,
             sparse_query=sparse_query,
+            sparse_names=config.frame_sparse_names,
         )
     finally:
         timings.record("qdrant", started)
@@ -112,6 +135,54 @@ def search_vector(
         return fusion.fuse_frames_and_clips(frames, clips, config.clip_weight)
     finally:
         timings.record("fuse", started)
+
+
+def search_speech(
+    text: str,
+    top_k: int,
+    config: RetrievalConfig,
+    timings: Timings,
+    video_ids: list[str] | None = None,
+) -> list[AsrSegment]:
+    """Retrieve speech segments matching the query, dense and lexical fused.
+
+    Returns an empty list when the stage is off or unconfigured, so the caller
+    can treat "no speech collection" and "no matching speech" identically.
+    """
+    if not config.asr_enabled or not config.asr_collection or config.asr_weight <= 0:
+        return []
+
+    started = time.perf_counter()
+    try:
+        dense = (
+            text_features.embed_query(config.asr_profile, text)
+            if config.asr_dense_weight > 0
+            else None
+        )
+        lexical = (
+            encode_query_sparse(text, config)
+            if config.asr_sparse_weight > 0
+            else None
+        )
+        if dense is None and lexical is None:
+            return []
+
+        dense_hits, sparse_hits = search_asr(
+            get_qdrant_client(),
+            config.asr_collection,
+            dense,
+            lexical,
+            limit=dedupe.overfetch_limit(top_k),
+            query_filter=build_filter(video_ids=video_ids),
+        )
+        return asr.fuse_asr(
+            dense_hits,
+            sparse_hits,
+            config.asr_dense_weight,
+            config.asr_sparse_weight,
+        )
+    finally:
+        timings.record("asr", started)
 
 
 def rank(
@@ -148,4 +219,18 @@ def retrieve(
     vector = encode_query(text, config, timings)
     sparse_query = encode_query_sparse(text, config)
     hits = search_vector(vector, top_k, config, timings, video_ids, sparse_query)
+
+    # Before dedupe on purpose. The bonus is applied per frame, and dedupe keeps
+    # the best frame per shot, so boosting first lets speech decide *which*
+    # frame represents a shot as well as where that shot ranks.
+    segments = search_speech(text, top_k, config, timings, video_ids)
+    if segments:
+        started = time.perf_counter()
+        try:
+            hits = asr.apply_asr_bonus(
+                hits, segments, config.asr_weight, config.asr_pad_sec
+            )
+        finally:
+            timings.record("asr_bonus", started)
+
     return rank(hits, text, top_k, config, timings)

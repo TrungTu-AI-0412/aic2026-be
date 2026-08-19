@@ -42,7 +42,11 @@ def _vector(index: int) -> list[float]:
 
 @pytest.fixture
 def populated(client, collection_name):
-    collections.create_collection(client, collection_name, VECTOR_SIZE)
+    collections.create_collection(
+        client,
+        collection_name,
+        dense_vectors={collections.DENSE_VECTOR_NAME: VECTOR_SIZE},
+    )
     payload_indexes.create_payload_indexes(
         client, collection_name, IngestionEntity.FRAMES
     )
@@ -138,7 +142,16 @@ def hybrid(client, collection_name):
         "Tam DUnG LuU Thong doi Voi Xe 3 BaNH",
         "",
     ]
-    collections.create_collection(client, collection_name, VECTOR_SIZE)
+    # Both lexical slots are declared here because this fixture exercises the
+    # hybrid `search()` primitive itself. It is not the production frame layout:
+    # frames declare no `speech` slot, which `test_vector_store_collections`
+    # pins separately.
+    collections.create_collection(
+        client,
+        collection_name,
+        dense_vectors={collections.DENSE_VECTOR_NAME: VECTOR_SIZE},
+        sparse_vectors=(collections.SPARSE_SPEECH, collections.SPARSE_OCR),
+    )
 
     points = []
     for index, text in enumerate(texts):
@@ -174,6 +187,7 @@ class TestHybridSearch:
             _vector(0),
             limit=3,
             sparse_query=sparse.encode("Israel Hezbollah leo thang"),
+            sparse_names=(collections.SPARSE_SPEECH, collections.SPARSE_OCR),
         )
 
         assert hits[0].original_frame_id == 2
@@ -191,6 +205,7 @@ class TestHybridSearch:
             _vector(0),
             limit=3,
             sparse_query=sparse.encode("dồng bằng sông cửu long"),
+            sparse_names=(collections.SPARSE_SPEECH, collections.SPARSE_OCR),
         )
 
         assert hits[0].original_frame_id == 0
@@ -220,6 +235,7 @@ class TestHybridSearch:
             _vector(0),
             limit=4,
             sparse_query=sparse.encode("Israel Hezbollah"),
+            sparse_names=(collections.SPARSE_SPEECH, collections.SPARSE_OCR),
         )
 
         assert 99 in [hit.original_frame_id for hit in hits]
@@ -235,6 +251,7 @@ class TestHybridSearch:
             _vector(0),
             limit=3,
             sparse_query=sparse.encode("tạm dừng lưu thông"),
+            sparse_names=(collections.SPARSE_SPEECH, collections.SPARSE_OCR),
         )
 
         assert hits[0].original_frame_id == 1
@@ -249,6 +266,7 @@ class TestHybridSearch:
             _vector(2),
             limit=3,
             sparse_query=sparse.encode("Israel Hezbollah"),
+            sparse_names=(collections.SPARSE_SPEECH, collections.SPARSE_OCR),
         )
 
         assert 2 in [hit.original_frame_id for hit in hits]
@@ -256,7 +274,11 @@ class TestHybridSearch:
 
 class TestOptimizeCollection:
     def test_collection_reaches_green(self, client, collection_name):
-        collections.create_collection(client, collection_name, VECTOR_SIZE)
+        collections.create_collection(
+        client,
+        collection_name,
+        dense_vectors={collections.DENSE_VECTOR_NAME: VECTOR_SIZE},
+    )
         upsert.upsert_points(
             client,
             collection_name,

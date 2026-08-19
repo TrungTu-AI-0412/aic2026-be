@@ -675,7 +675,8 @@
         "type": "string",
         "enum": [
           "frames",
-          "clips"
+          "clips",
+          "asr_segments"
         ],
         "title": "IngestionEntity"
       },
@@ -847,6 +848,60 @@
       },
       "KisSearchRequest": {
         "properties": {
+          "asr_enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Asr Enabled",
+            "description": "Toggle the ASR overlap bonus for this query."
+          },
+          "asr_weight": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 1.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Asr Weight",
+            "description": "Share of a frame's score the best overlapping segment adds."
+          },
+          "asr_dense_weight": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 1.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Asr Dense Weight",
+            "description": "Weight of the dense (semantic) half of the speech search."
+          },
+          "asr_sparse_weight": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 1.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Asr Sparse Weight",
+            "description": "Weight of the lexical (BM25) half of the speech search."
+          },
           "task": {
             "type": "string",
             "const": "kis",
@@ -907,6 +962,60 @@
       },
       "QaSearchRequest": {
         "properties": {
+          "asr_enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Asr Enabled",
+            "description": "Toggle the ASR overlap bonus for this query."
+          },
+          "asr_weight": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 1.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Asr Weight",
+            "description": "Share of a frame's score the best overlapping segment adds."
+          },
+          "asr_dense_weight": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 1.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Asr Dense Weight",
+            "description": "Weight of the dense (semantic) half of the speech search."
+          },
+          "asr_sparse_weight": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 1.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Asr Sparse Weight",
+            "description": "Weight of the lexical (BM25) half of the speech search."
+          },
           "task": {
             "type": "string",
             "const": "qa",
@@ -1090,6 +1199,60 @@
       },
       "TrakeSearchRequest": {
         "properties": {
+          "asr_enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Asr Enabled",
+            "description": "Toggle the ASR overlap bonus for this query."
+          },
+          "asr_weight": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 1.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Asr Weight",
+            "description": "Share of a frame's score the best overlapping segment adds."
+          },
+          "asr_dense_weight": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 1.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Asr Dense Weight",
+            "description": "Weight of the dense (semantic) half of the speech search."
+          },
+          "asr_sparse_weight": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 1.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Asr Sparse Weight",
+            "description": "Weight of the lexical (BM25) half of the speech search."
+          },
           "task": {
             "type": "string",
             "const": "trake",
