@@ -34,6 +34,18 @@ async def build_container(settings: Settings) -> Container:
                 rerank_enabled=settings.RERANK_ENABLED,
                 rerank_top_n=settings.RERANK_TOP_N,
                 rerank_model=settings.RERANK_MODEL,
+                # These three were previously left at their dataclass defaults,
+                # which silently made the matching settings dead.
+                hybrid_enabled=settings.HYBRID_ENABLED,
+                sparse_method=settings.SPARSE_METHOD,
+                splade_model=settings.SPLADE_MODEL,
+                asr_collection=settings.QDRANT_ASR_COLLECTION,
+                asr_enabled=settings.ASR_ENABLED,
+                asr_profile=settings.ASR_FEATURE_PROFILE,
+                asr_weight=settings.ASR_WEIGHT,
+                asr_dense_weight=settings.ASR_DENSE_WEIGHT,
+                asr_sparse_weight=settings.ASR_SPARSE_WEIGHT,
+                asr_pad_sec=settings.ASR_PAD_SEC,
             )
         ),
         ingestion_service=SqliteIngestionService(

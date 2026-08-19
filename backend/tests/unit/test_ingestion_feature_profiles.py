@@ -1,5 +1,6 @@
 import pytest
 
+from app.core.config import settings
 from app.ingestion.service import SqliteIngestionService
 from app.schemas.ingestions import CreateIngestionJobRequest, IngestionEntity
 from app.services.ingestions import UnsupportedFeatureProfileError
@@ -26,10 +27,13 @@ async def test_lists_registered_feature_profiles(service):
 
     assert [profile.name for profile in response.profiles] == [
         "clip-b32-v1",
+        "qwen3-embed-0.6b-v1",
         "siglip2-giant-opt-patch16-384-v1",
         "siglip2-so400m-patch14-384-v1",
     ]
-    assert response.default_profile == "siglip2-so400m-patch14-384-v1"
+    # Read from settings, not hardcoded: the default is whatever the deployment
+    # configures, and a literal here just asserts the contents of `.env`.
+    assert response.default_profile == settings.FEATURE_PROFILE
     assert response.profiles[0].model_id == "openai/clip-vit-base-patch32"
     assert response.profiles[0].dimension == 512
 

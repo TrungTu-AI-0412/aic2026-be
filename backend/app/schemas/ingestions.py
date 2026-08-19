@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 class IngestionEntity(str, Enum):
     FRAMES = "frames"
     CLIPS = "clips"
+    ASR_SEGMENTS = "asr_segments"
 
 
 class IngestionStatus(str, Enum):

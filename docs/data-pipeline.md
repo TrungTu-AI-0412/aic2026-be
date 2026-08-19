@@ -254,3 +254,159 @@ python scripts/build_eval_set.py --limit 300
 ```
 
 Parquet vẫn là nguồn sự thật để dựng lại và đối soát.
+
+---
+
+## 8. Dựng lại từ video thô (đường đi hiện tại)
+
+Mục 7 ở trên cần `map-keyframes` và ảnh keyframe của ban tổ chức. **Cả hai đều
+không có trên máy này**: 177.321 đường dẫn trong `frames.parquet` cũ đều trỏ vào
+file không tồn tại. Nguồn ảnh duy nhất dùng được là `data/videos` (873 file,
+78 GB), nên toàn bộ pipeline chạy lại từ video thô.
+
+```bash
+./scripts/ingest_all.sh          # chạy trong tmux, ~9 giờ
+```
+
+Thời gian **đã đo** trên 1× L40S / 4 vCPU, không phải phỏng đoán:
+
+| Bước | Thông lượng | Toàn bộ corpus |
+| --- | ---: | ---: |
+| probe | — | ~1 phút |
+| shot detection (TransNetV2, 3 worker) | 737 fps | **~4,6 h** |
+| sampling 3 keyframe/shot (3 worker) | 1.094 fps | **~3,1 h** |
+| build_asr_manifest | — | ~30 s |
+| embed frame (SigLIP2 so400m) | 83 điểm/s | ~1 h |
+| embed ASR (Qwen3-0.6B) | 85 điểm/s | ~7 phút |
+
+Đầu ra: ~293k keyframe (**26 GB** JPEG, không phải 50 GB như dự tính ban đầu) và
+35.202 segment ASR.
+
+### Vì sao dùng process, không dùng thread
+
+`app/features/media.py` ghi lại một deadlock thật: PyAV đẩy log của FFmpeg vào
+logging của Python từ chính thread đang decode, giành GIL, trong khi thread chính
+đang giữ GIL bên trong `avcodec_free_context()`. `transformers` cài lại callback
+đó mỗi lần import.
+
+Đã thử `av.logging.restore_default_callback()`: hết treo trong một lần chạy
+3.000 frame và nhanh hơn 1,65× (705 fps so với 428 fps). Nhưng đây là race, một
+lần chạy đúng không chứng minh được gì. Ba process, mỗi process decode
+đơn luồng, cho **1.284 fps** — vừa an toàn hơn vừa nhanh hơn. Giữ
+`thread_type = "NONE"` ở mọi nơi.
+
+Đo thêm: 4 worker chỉ được 763 fps so với 737 fps của 3 worker, tức CPU đã bão
+hoà ở 3. Mặc định là 3, chừa một core cho process cha.
+
+### Đổi model ảnh — quy trình
+
+`FEATURE_PROFILE` gắn chặt với collection: số chiều dense cố định lúc tạo
+collection. Nên **đổi model luôn có nghĩa là tạo collection mới**, không bao giờ
+cập nhật tại chỗ. Nếu profile và collection lệch nhau, mọi truy vấn rơi vào
+không gian vector sai và trả về kết quả trông hợp lý nhưng vô nghĩa — không có
+lỗi nào được nêu.
+
+Slot dense được ghi có số chiều lấy từ profile của **chính job đó**, nên so sánh
+hai model là chuyện làm được:
+
+```bash
+# cùng một manifest, hai collection, hai profile
+curl -sX POST localhost:8000/api/v1/ingestions -H 'content-type: application/json' \
+  -d '{"entity":"frames","manifest_path":"manifests/frames.parquet",
+       "collection_name":"probe-giant",
+       "feature_profile":"siglip2-giant-opt-patch16-384-v1"}'
+curl -sX POST localhost:8000/api/v1/ingestions -H 'content-type: application/json' \
+  -d '{"entity":"frames","manifest_path":"manifests/frames.parquet",
+       "collection_name":"probe-so400m",
+       "feature_profile":"siglip2-so400m-patch14-384-v1"}'
+```
+
+Rồi trỏ `QDRANT_FRAMES_COLLECTION` + `FEATURE_PROFILE` vào từng cái và so cùng
+một bộ câu hỏi. **Phải đổi cả hai cùng lúc.** Dùng `--limit` ở bước sampling để
+so trên vài chục video thay vì chạy lại 9 giờ.
+
+Thêm model chưa có trong `FEATURE_PROFILES`: khai báo
+`FeatureProfile(model_id=..., dimension=..., kind="image"|"text")` và kiểm số
+chiều với `hidden_size` trong config của model. Sai số chiều chỉ lộ ra ở bước
+upsert, sau khi đã trả xong toàn bộ chi phí embed.
+
+`siglip2-giant-opt-patch16-384` **không có trong HF cache** — phải tải ~4 GB.
+`scripts/ingest_all.sh` tải ở bước 0 rồi kiểm lại bằng `HF_HUB_OFFLINE=1`, vì
+đường truy vấn lúc thi không được phép ra mạng.
+
+### Hai collection, không phải một
+
+Segment ASR là **khoảng thời gian**, keyframe là **một thời điểm**; hai thứ không
+có khoá chung. Nên tách hai collection và nối lại theo thời gian lúc truy vấn
+(`app/ranking/asr.py`).
+
+| Collection | Vector | Có dữ liệu |
+| --- | --- | --- |
+| `frames` | `dense_video` (ảnh) | có |
+| | `dense_text` | chưa — dành cho caption VLM |
+| | `ocr` (sparse) | chưa — chờ `join_ocr` re-upsert |
+| `asr` | `dense_text` (Qwen3-0.6B) | có |
+| | `speech` (sparse BM25 + IDF) | có |
+
+Frames **không khai báo slot `speech`**. Nếu có, cùng một đoạn lời nói sẽ được
+tính điểm hai lần: một lần qua RRF trong collection frames, một lần qua overlap
+bonus. Hệ quả cần biết: lúc này frames không có sparse vector nào được ghi, nên
+tìm frame là thuần dense, và `sparse_names` phải để rỗng — truy vấn một slot
+chưa có điểm nào sẽ lỗi thẳng.
+
+### ASR: chỉ giữ `text_corrected`
+
+Luật cũ của dự án là giữ cả hai cột. Đã đo lại trước khi bỏ: trong
+40.023 segment, số segment **có `text` thô mà không có `text_corrected` là 0**
+(36.003 so với 35.997). Bỏ cột thô không mất segment nào tra được, và BM25 vốn
+đã lowercase + bỏ dấu câu.
+
+Mất mát thật là về mặt định tính: `text_corrected` trôi chảy nhưng vẫn sai — LLM
+chỉ thêm dấu câu, từ nghe sai vẫn sai và giờ trông như câu đúng. Cột thô là dấu
+hiệu duy nhất cho biết đoạn đó không đáng tin. Đó là thứ cho người soi lại kết
+quả, không phải tín hiệu truy xuất, và `data/transcripts/` vẫn giữ cả hai cột.
+
+**Bỏ segment dưới 2 từ.** 801 segment một từ gần như đều là tiếng đệm — "Ừ", "À",
+"thì", "Ờ", "và", "Dạ". Không chỉ vô dụng mà còn có hại: một transcript một chữ
+vẫn sinh ra vector dense, và vì điểm được chuẩn hoá với hit tốt nhất bằng 1.0,
+segment đó **đã thực sự** vượt lên trên lời nói đúng chủ đề và trao cho frame
+toàn bộ overlap bonus. Ngưỡng dừng ở 1 từ có chủ đích: segment hai từ có thể là
+tên người ("Xuân Sơn"), đúng thứ một câu truy vấn hay hỏi.
+
+Entity tách thành ba trường lọc riêng, không gộp một danh sách:
+
+| Trường | Segment | Lần xuất hiện |
+| --- | ---: | ---: |
+| `asr_locations` | 5.024 | 10.941 |
+| `asr_persons` | 3.349 | 5.060 |
+| `asr_orgs` | 2.311 | 2.903 |
+
+Nhóm `others` bị bỏ: 900 segment, không có nghĩa xác định.
+
+Bỏ `publish_date` và `keywords` khỏi mọi payload. `keywords` chỉ từng tồn tại để
+nhồi thêm cho sparse vector `speech` của frame — thứ giờ không còn; `publish_date`
+là chuỗi `dd/mm/yyyy`, sắp xếp sai và lọc kém.
+
+### ASR overlap bonus
+
+Truy vấn tìm cả hai collection. Mỗi frame được cộng
+`asr_weight × điểm segment tốt nhất phủ nó về thời gian`:
+
+- **Cộng, không nhân.** 4,5% thời lượng video không có segment nào và 22/873
+  video không có transcript, nên "không có lời nói" không bao giờ được coi là
+  bằng chứng chống lại một frame.
+- **Segment tốt nhất, không phải tổng.** Một shot dài phủ nhiều segment; cộng dồn
+  sẽ thưởng cho độ dài shot thay vì độ liên quan.
+- **Trước dedupe.** Nhờ vậy lời nói quyết định cả *frame nào* đại diện cho shot,
+  chứ không chỉ shot đó xếp thứ mấy.
+- **Dense nặng hơn sparse** (0,7 / 0,3). RRF của Qdrant gộp theo *hạng* và không
+  có chỗ đặt trọng số, nên hai nhánh được truy vấn riêng rồi chuẩn hoá min-max và
+  cộng theo trọng số trong `ranking/asr.py`.
+
+Bật/tắt và chỉnh trọng số theo từng request: `asr_enabled`, `asr_weight`,
+`asr_dense_weight`, `asr_sparse_weight` trên cả ba endpoint tìm kiếm.
+
+**Đừng chỉnh `ASR_WEIGHT` dựa trên `data/eval_set.jsonl`.** Tập đó sinh ra *từ*
+chính ASR, nên nó sẽ luôn ưu ái mọi tín hiệu dựa trên ASR — tăng trọng số sẽ
+trông như cải thiện bất kể thực tế. Dùng câu hỏi tự viết, hoặc chạy ablation với
+`--no-hybrid`.

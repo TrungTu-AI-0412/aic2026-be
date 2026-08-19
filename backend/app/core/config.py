@@ -30,14 +30,36 @@ class Settings(BaseSettings):
     # build the API should serve. Ingestion never writes to the active one.
     QDRANT_FRAMES_COLLECTION: str = "aic2026-frames-v1"
     QDRANT_CLIPS_COLLECTION: Optional[str] = None
+    # Speech segments, one point per ASR segment rather than per frame. Unset
+    # disables the ASR stage entirely, so an older deployment keeps working.
+    QDRANT_ASR_COLLECTION: Optional[str] = None
 
     # Must match the profile the active collection was ingested with: the
     # query vector has to land in the same space, at the same dimension.
-    FEATURE_PROFILE: str = "siglip2-so400m-patch14-384-v1"
+    FEATURE_PROFILE: str = "siglip2-giant-opt-patch16-384-v1"
+    # Text profile for the ASR collection. Separate from FEATURE_PROFILE
+    # because speech is matched text-to-text, not against an image space.
+    ASR_FEATURE_PROFILE: str = "qwen3-embed-0.6b-v1"
 
-    # Sparse representation method: "bm25" or "splade"
+    # Lexical retrieval. Sparse method is "bm25" or "splade"; keep bm25 unless
+    # a Vietnamese SPLADE model is cached, since the default one is
+    # English-only and its subword ids are incompatible with the CRC32 slots.
+    HYBRID_ENABLED: bool = True
     SPARSE_METHOD: str = "bm25"
     SPLADE_MODEL: str = "naver/splade-cocondenser-ensembledistil"
+
+    # ASR overlap bonus. A query also searches the speech collection, and each
+    # frame is boosted by the best-scoring segment whose time range covers it.
+    ASR_ENABLED: bool = True
+    ASR_WEIGHT: float = 0.3
+    # Dense is weighted above sparse: the transcript is fluent Vietnamese, so
+    # semantic similarity carries more of the signal than term overlap, which
+    # is there to catch the names and numbers dense retrieval loses.
+    ASR_DENSE_WEIGHT: float = 0.7
+    ASR_SPARSE_WEIGHT: float = 0.3
+    # Segment bounds in the source are rounded to whole seconds, and 4.5% of
+    # video time has no segment at all, so overlap is tested with slack.
+    ASR_PAD_SEC: float = 1.0
 
     # Weight of the clip index when fusing it with the frame index. 0 disables
     # fusion and searches frames only.
