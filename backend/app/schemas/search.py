@@ -42,9 +42,16 @@ class KisSearchRequest(AsrOverrides):
 
 
 class QaSearchRequest(AsrOverrides):
+    """Same retrieval as KIS: find the moment, the operator reads it.
+
+    There is no `question` field. It was never encoded — SigLIP2 scores a
+    caption against an image and "what colour is the bike?" describes no
+    image — and no VQA model is wired in, so nothing downstream could use it.
+    The operator answers off the frame and types it into the submission.
+    """
+
     task: Literal["qa"]
     description: str = Field(min_length=1)
-    question: str = Field(min_length=1)
     top_k: int = Field(default=100, ge=1, le=100)
 
 
@@ -108,7 +115,6 @@ class SearchResult(BaseModel):
     rank: int
     video_id: str
     frame_ids: list[int]
-    answer: str | None = None
     score: float
     # TRAKE only, and additive: `frame_ids` keeps its meaning, so a client that
     # ignores this field is unaffected. Four bare integers cannot tell an
