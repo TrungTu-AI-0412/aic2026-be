@@ -44,43 +44,37 @@ TRAKE_MAX_GAP_SEC = 300.0
 
 
 def search_kis(request: KisSearchRequest, config: RetrievalConfig) -> SearchResponse:
-    timings = Timings()
-    hits = retrieve(request.description, request.top_k, config, timings)
-
-    results = [
-        SearchResult(
-            rank=rank,
-            video_id=hit.video_id,
-            frame_ids=[hit.representative_frame],
-            score=hit.score,
-        )
-        for rank, hit in enumerate(hits, start=1)
-    ]
-    return _response("kis", results, config, timings)
+    return _frame_search("kis", request.description, request.top_k, config)
 
 
 def search_qa(request: QaSearchRequest, config: RetrievalConfig) -> SearchResponse:
     """Locate the moment the question is about.
 
-    Retrieval uses the description, which describes the scene; the question
-    describes what to read off it. `answer` stays None because no visual
-    question-answering model is wired in - reporting a guess would be worse
-    than reporting nothing.
+    Byte-for-byte the same retrieval as KIS, because the question was never
+    part of it: the description locates the scene, and the operator reads the
+    answer off the frame and types it into the submission. The two tracks stay
+    separate endpoints only because they export different row shapes.
     """
+    return _frame_search("qa", request.description, request.top_k, config)
+
+
+def _frame_search(
+    task: str, text: str, top_k: int, config: RetrievalConfig
+) -> SearchResponse:
+    """One hit per shot, one frame per hit."""
     timings = Timings()
-    hits = retrieve(request.description, request.top_k, config, timings)
+    hits = retrieve(text, top_k, config, timings)
 
     results = [
         SearchResult(
             rank=rank,
             video_id=hit.video_id,
             frame_ids=[hit.representative_frame],
-            answer=None,
             score=hit.score,
         )
         for rank, hit in enumerate(hits, start=1)
     ]
-    return _response("qa", results, config, timings)
+    return _response(task, results, config, timings)
 
 
 def search_trake(request: TrakeSearchRequest, config: RetrievalConfig) -> SearchResponse:
@@ -143,7 +137,7 @@ def search_trake(request: TrakeSearchRequest, config: RetrievalConfig) -> Search
             video_id=video_id,
             frame_ids=[hit.representative_frame for hit in chosen],
             score=score,
-            events=_event_hits(chosen, slots),
+            events=_event_hits(chosen, slots, max_gap),
         )
         for rank, (score, video_id, chosen, slots) in enumerate(
             sequences[: request.top_k], start=1
@@ -254,7 +248,7 @@ def _best_increasing_sequence(
 
 
 def _event_hits(
-    chosen: list[ScoredFrame], slots: list[list[ScoredFrame]]
+    chosen: list[ScoredFrame], slots: list[list[ScoredFrame]], max_gap: float
 ) -> list[EventHit]:
     """Report where each event landed, with the runners-up it beat."""
     return [
@@ -271,6 +265,7 @@ def _event_hits(
                     hit,
                     chosen[index - 1] if index else None,
                     chosen[index + 1] if index + 1 < len(chosen) else None,
+                    max_gap,
                 )
             ],
         )
@@ -283,22 +278,35 @@ def _alternates(
     chosen: ScoredFrame,
     previous: ScoredFrame | None,
     following: ScoredFrame | None,
+    max_gap: float,
 ) -> list[ScoredFrame]:
     """Other candidates for one event that keep the sequence valid.
 
-    Bounded by the neighbouring events' picks, so an operator swapping one in
-    cannot produce an out-of-order submission. Candidates arrive score-ordered,
-    so this is a filter and a slice.
+    Held to the same two rules the sequence itself had to satisfy against its
+    neighbouring picks: after the previous event, before the next, and within
+    the gap. Offering a candidate the ranker would have rejected would let an
+    operator assemble a sequence the system does not consider a sequence.
+    Candidates arrive score-ordered, so this is a filter and a slice.
     """
-    low = previous.representative_frame if previous is not None else None
-    high = following.representative_frame if following is not None else None
     return [
         hit
         for hit in candidates
         if hit.representative_frame != chosen.representative_frame
-        and (low is None or hit.representative_frame > low)
-        and (high is None or hit.representative_frame < high)
+        and _follows(previous, hit, max_gap)
+        and _follows(hit, following, max_gap)
     ][:TRAKE_ALTERNATES_PER_EVENT]
+
+
+def _follows(
+    previous: ScoredFrame | None, following: ScoredFrame | None, max_gap: float
+) -> bool:
+    """Whether two hits could be consecutive events, ignoring absent ends."""
+    if previous is None or following is None:
+        return True
+    return (
+        previous.representative_frame < following.representative_frame
+        and _within_gap(previous, following, max_gap)
+    )
 
 
 def _candidate(hit: ScoredFrame) -> EventCandidate:

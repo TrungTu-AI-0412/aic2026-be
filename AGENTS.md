@@ -821,8 +821,21 @@ enforce temporal order when applicable
 return complete sequence candidates
 ```
 
-The existing implementation searches events separately and selects, per video,
-a highest-scoring strictly frame-increasing sequence covering every event.
+The implementation now follows that hierarchy. `tracks._candidate_videos`
+searches the overview *and* every event globally and keeps the top
+`TRAKE_VIDEO_CANDIDATES` videos, scored as `best overview hit + mean of best
+per-event hits`. Coverage is deliberately not required at that stage: demanding
+a global hit for every event is what dropped correct videos, since a
+fine-grained event does not reach a global top-N against 290k frames. Then
+`engine.retrieve_per_video` aligns each event *inside* each candidate, one
+filtered query per (video, event) - one query over all of them would return the
+global top-N across them and starve a video that ranks low overall. That stage
+collapses no shots and reranks nothing: two events can fall inside one
+two-second shot, and the cross-encoder head covers the top-N of a single global
+list. `tracks._best_increasing_sequence` then returns complete sequence
+hypotheses, strictly frame-increasing and subject to `max_gap_sec` between
+consecutive events, each carrying per-event frame/shot/timestamp/score plus
+runners-up bounded by the neighbouring picks.
 
 Any modification to TRAKE must preserve the distinction between:
 
@@ -1189,6 +1202,12 @@ sync when either file contains rules intended for all coding agents.
 - The three raw-video preprocessing stages do support resume per video.
 - `batch_builder.scan_clips` raises `NotImplementedError` pending a clip file
   naming convention.
+- TRAKE event localisation is only as fine as the keyframes: three per shot, so
+  a sub-second moment is bracketed rather than pinned. `events[].alternates`
+  exists so an operator closes that gap by hand. The VLM endpoint in `.env` is
+  read by no code and is the obvious next lever.
+- No TRAKE eval set exists (`data/eval_set.jsonl` is absent), so retrieval
+  changes to it are checked by unit tests and by eye, not measured.
 - `docs/architecture.md` is empty.
 - Automated VQA answer generation is not implemented.
 - Exact TRAKE semantic-boundary refinement beyond coarse retrieved frames

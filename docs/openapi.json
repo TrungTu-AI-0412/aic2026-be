@@ -659,6 +659,88 @@
         ],
         "title": "CreateIngestionJobResponse"
       },
+      "EventCandidate": {
+        "properties": {
+          "frame_id": {
+            "type": "integer",
+            "title": "Frame Id"
+          },
+          "shot_id": {
+            "type": "integer",
+            "title": "Shot Id"
+          },
+          "pts_sec": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pts Sec"
+          },
+          "score": {
+            "type": "number",
+            "title": "Score"
+          }
+        },
+        "type": "object",
+        "required": [
+          "frame_id",
+          "shot_id",
+          "score"
+        ],
+        "title": "EventCandidate",
+        "description": "One frame proposed for one TRAKE event."
+      },
+      "EventHit": {
+        "properties": {
+          "frame_id": {
+            "type": "integer",
+            "title": "Frame Id"
+          },
+          "shot_id": {
+            "type": "integer",
+            "title": "Shot Id"
+          },
+          "pts_sec": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pts Sec"
+          },
+          "score": {
+            "type": "number",
+            "title": "Score"
+          },
+          "event_index": {
+            "type": "integer",
+            "title": "Event Index"
+          },
+          "alternates": {
+            "items": {
+              "$ref": "#/components/schemas/EventCandidate"
+            },
+            "type": "array",
+            "title": "Alternates"
+          }
+        },
+        "type": "object",
+        "required": [
+          "frame_id",
+          "shot_id",
+          "score",
+          "event_index"
+        ],
+        "title": "EventHit",
+        "description": "The frame chosen for an event, plus the ones it beat.\n\n`alternates` are bounded by the neighbouring events' chosen frames, so an\noperator swapping one in cannot produce an out-of-order submission."
+      },
       "ExportFormat": {
         "type": "string",
         "enum": [
@@ -1181,7 +1263,8 @@
           "frame_id",
           "answer"
         ],
-        "title": "QaCandidate"
+        "title": "QaCandidate",
+        "description": "A frame plus the answer the operator read off it.\n\n`answer` is human input - no VQA model produces it - so it arrives with\nwhatever a paste carried."
       },
       "QaSearchRequest": {
         "properties": {
@@ -1249,11 +1332,6 @@
             "minLength": 1,
             "title": "Description"
           },
-          "question": {
-            "type": "string",
-            "minLength": 1,
-            "title": "Question"
-          },
           "top_k": {
             "type": "integer",
             "maximum": 100.0,
@@ -1265,10 +1343,10 @@
         "type": "object",
         "required": [
           "task",
-          "description",
-          "question"
+          "description"
         ],
-        "title": "QaSearchRequest"
+        "title": "QaSearchRequest",
+        "description": "Same retrieval as KIS: find the moment, the operator reads it.\n\nThere is no `question` field. It was never encoded \u2014 SigLIP2 scores a\ncaption against an image and \"what colour is the bike?\" describes no\nimage \u2014 and no VQA model is wired in, so nothing downstream could use it.\nThe operator answers off the frame and types it into the submission."
       },
       "SearchResponse": {
         "properties": {
@@ -1330,20 +1408,23 @@
             "type": "array",
             "title": "Frame Ids"
           },
-          "answer": {
+          "score": {
+            "type": "number",
+            "title": "Score"
+          },
+          "events": {
             "anyOf": [
               {
-                "type": "string"
+                "items": {
+                  "$ref": "#/components/schemas/EventHit"
+                },
+                "type": "array"
               },
               {
                 "type": "null"
               }
             ],
-            "title": "Answer"
-          },
-          "score": {
-            "type": "number",
-            "title": "Score"
+            "title": "Events"
           }
         },
         "type": "object",
@@ -1499,7 +1580,36 @@
             "maximum": 100.0,
             "minimum": 1.0,
             "title": "Top K",
+            "description": "Sequences to return. Effectively capped by the number of candidate videos the overview stage keeps.",
             "default": 100
+          },
+          "video_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Video Ids",
+            "description": "Search only these videos, skipping video selection entirely. For an operator who already found the video with a KIS query."
+          },
+          "max_gap_sec": {
+            "anyOf": [
+              {
+                "type": "number",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Gap Sec",
+            "description": "Widest gap in seconds between consecutive events. 0 disables the check; None uses the configured default."
           }
         },
         "type": "object",

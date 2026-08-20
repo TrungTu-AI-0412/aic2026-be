@@ -123,9 +123,29 @@ event loop. `engine.retrieve()` is the one shared path for every track:
    with the cosine scores below it
 
 `tracks.py` decides only *what* to encode and how to shape results. KIS/QA return
-one frame per hit; QA leaves `answer=None` (no VQA model is wired in); TRAKE
-searches each event separately and picks, per video, the highest-scoring
-strictly frame-increasing selection covering every event.
+one frame per hit; QA leaves `answer=None` (no VQA model is wired in).
+
+**TRAKE runs in two stages**, because "which video" and "where in it" are
+different questions. `_candidate_videos` searches the overview *and* every event
+globally and keeps the top `TRAKE_VIDEO_CANDIDATES` videos, scoring each as
+`best overview hit + mean of best per-event hits`. Coverage is deliberately not
+required here: demanding a global hit for every event is what dropped correct
+videos, since a fine-grained event ("the moment all four feet touch the ground")
+does not reach a global top-N against 290k frames. Then
+`engine.retrieve_per_video` searches each event again *inside* each candidate —
+one filtered query per (video, event), because one query over all of them
+returns the global top-N across them and starves a video that ranks low
+overall. That stage does not collapse shots and turns reranking off: two events
+can happen inside one two-second shot, and the cross-encoder head covers the
+top-N of a single global list, so per-video it would rescore an arbitrary slice.
+Finally `_best_increasing_sequence` picks, per video, the highest-scoring
+strictly frame-increasing selection covering every event, subject to
+`max_gap_sec` between consecutive events. Ordering is on `original_frame_id`
+(what a submission reports, and monotone with time within a video); `pts_sec` is
+used only for the gap, which is a duration and so cannot be expressed in frames
+across videos with different frame rates. The result carries `events[]` —
+per-event frame, shot, timestamp, score and the runners-up it beat, bounded by
+the neighbouring picks so a swap cannot produce an out-of-order submission.
 
 **Ingestion path** (`app/ingestion/`):
 
@@ -216,4 +236,10 @@ types.
 
 - `batch_builder.scan_clips` raises `NotImplementedError` pending a clip file
   naming convention.
+- TRAKE event localisation is only as fine as the keyframes: three per shot, so
+  a sub-second moment is bracketed, not pinned. `events[].alternates` exists so
+  an operator closes that last gap by hand. The VLM endpoint in `.env` is unread
+  by any code and is the obvious next lever.
+- No TRAKE eval set exists (`data/eval_set.jsonl` is absent), so retrieval
+  changes to it are checked by unit tests and by eye, not measured.
 - `docs/architecture.md` is empty.

@@ -3,6 +3,7 @@ import json
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+from pydantic import ValidationError
 
 from app.schemas.submissions import ExportFormat, ExportRequest
 from app.services.submissions import FrameOutOfBoundsError, VideoNotFoundError
@@ -210,3 +211,16 @@ class TestExport:
         result = await service.export(kis_request())
 
         assert result.content.decode() == "L22_V001,1200\nL26_V190,40\n"
+
+
+class TestQaAnswerNormalisation:
+    """The answer is typed by a person, so it arrives as a paste does."""
+
+    def test_padding_and_newlines_collapse_to_one_line(self) -> None:
+        rendered = formats.to_csv(qa_request("  Hà Nội\n hai  triệu \n")).decode()
+
+        assert rendered == "L22_V001,1200,Hà Nội hai triệu\n"
+
+    def test_a_blank_answer_is_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            qa_request("   \n ")
