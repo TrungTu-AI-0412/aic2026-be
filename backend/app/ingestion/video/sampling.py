@@ -25,9 +25,14 @@ from pathlib import Path
 import av
 import numpy as np
 
+from functools import partial
+
+from app.ingestion.video import parallel
 from app.ingestion.manifest import (
     KEYFRAME_ARROW_SCHEMA,
     ClipManifestRow,
+    count_rows,
+    existing_video_ids,
     KeyframeManifestRow,
     VideoManifestRow,
     iter_rows,
@@ -37,6 +42,10 @@ from app.ingestion.manifest import (
 from app.schemas.ingestions import IngestionEntity
 
 DEFAULT_FRAMES_PER_SECOND = 1.0
+
+# Rows buffered before the manifest is rewritten. See shot_detect: Parquet
+# cannot be extended in place, so each flush rewrites the file.
+DEFAULT_FLUSH_ROWS = 2000
 
 # 720p keeps result grids fast to load and still readable enough to verify an
 # answer by eye. The embedding model resizes to a far smaller square anyway.
@@ -59,15 +68,30 @@ class SamplingError(Exception):
 
 
 class _Window:
-    """A target frame plus the neighbouring frames allowed to replace it."""
+    """A target frame plus the neighbouring frames allowed to replace it.
 
-    __slots__ = ("shot_id", "target", "low", "high")
+    The shot's own time range rides along: a keyframe is an instant, but the
+    ASR overlap bonus asks whether a span of speech covers it, and speech
+    segments are far longer than a frame.
+    """
 
-    def __init__(self, shot_id: int, target: int, low: int, high: int) -> None:
+    __slots__ = ("shot_id", "target", "low", "high", "start_sec", "end_sec")
+
+    def __init__(
+        self,
+        shot_id: int,
+        target: int,
+        low: int,
+        high: int,
+        start_sec: float = 0.0,
+        end_sec: float = 0.0,
+    ) -> None:
         self.shot_id = shot_id
         self.target = target
         self.low = low
         self.high = high
+        self.start_sec = start_sec
+        self.end_sec = end_sec
 
 
 def plan_targets(
@@ -75,8 +99,17 @@ def plan_targets(
     fps: float,
     frames_per_second: float = DEFAULT_FRAMES_PER_SECOND,
     boundary_inset: float = DEFAULT_BOUNDARY_INSET,
+    frames_per_shot: int | None = None,
 ) -> list[int]:
-    """Choose evenly spaced frame indexes inside one shot."""
+    """Choose evenly spaced frame indexes inside one shot.
+
+    `frames_per_shot` fixes the count per shot instead of deriving it from the
+    shot's duration. That decouples the keyframe total from how long shots
+    happen to run: a fixed 3 gives a short shot the same coverage as a long one,
+    where a per-second rate gives a two-second shot two frames and a
+    thirty-second shot thirty. It also makes the total predictable before the
+    run, which is what lets embedding cost and disk be budgeted up front.
+    """
     length = shot.end_frame - shot.start_frame + 1
     inset = int(length * boundary_inset)
     low = shot.start_frame + inset
@@ -84,8 +117,11 @@ def plan_targets(
     if high < low:
         low = high = (shot.start_frame + shot.end_frame) // 2
 
-    duration = length / fps
-    count = max(1, round(duration * frames_per_second))
+    if frames_per_shot is not None:
+        count = max(1, frames_per_shot)
+    else:
+        duration = length / fps
+        count = max(1, round(duration * frames_per_second))
 
     span = high - low + 1
     count = min(count, span)
@@ -110,7 +146,11 @@ def plan_windows(
         high = min(shot.end_frame, target + sharpness_window)
         if high < low:
             continue
-        windows.append(_Window(shot.shot_id, target, low, high))
+        windows.append(
+            _Window(
+                shot.shot_id, target, low, high, shot.start_sec, shot.end_sec
+            )
+        )
         previous_high = high
 
     return windows
@@ -190,13 +230,16 @@ def sample_video(
     sharpness_window: int = DEFAULT_SHARPNESS_WINDOW,
     max_height: int = DEFAULT_MAX_HEIGHT,
     qscale: int = DEFAULT_JPEG_QSCALE,
+    frames_per_shot: int | None = None,
 ) -> list[KeyframeManifestRow]:
     rate = video.require_constant_frame_rate()
     root = Path(output_dir)
 
     windows: list[_Window] = []
     for shot in sorted(shots, key=lambda item: item.start_frame):
-        targets = plan_targets(shot, float(rate), frames_per_second, boundary_inset)
+        targets = plan_targets(
+            shot, float(rate), frames_per_second, boundary_inset, frames_per_shot
+        )
         windows.extend(plan_windows(shot, targets, sharpness_window))
 
     if not windows:
@@ -246,6 +289,8 @@ def sample_video(
                             keyframe_n=len(rows) + 1,
                             original_frame_id=best_index,
                             pts_sec=best_index / rate,
+                            shot_start_sec=current.start_sec,
+                            shot_end_sec=current.end_sec,
                             path=str(destination),
                         )
                     )
@@ -278,36 +323,112 @@ def build_keyframe_manifest(
     max_height: int = DEFAULT_MAX_HEIGHT,
     qscale: int = DEFAULT_JPEG_QSCALE,
     on_progress=None,
+    frames_per_shot: int | None = None,
+    resume: bool = False,
+    limit: int | None = None,
+    workers: int | None = None,
+    flush_every: int = DEFAULT_FLUSH_ROWS,
 ) -> int:
+    """Sample keyframes for every video in the probe manifest.
+
+    Like shot detection this decodes every frame of every video, so it carries
+    the same `--resume` and periodic flushing: a run measured in hours must not
+    lose its work to one bad video at the end.
+    """
     shots_by_video = group_shots_by_video(shots_manifest)
-    rows: list[KeyframeManifestRow] = []
 
-    for video in iter_video_rows(videos_manifest):
-        shots = shots_by_video.get(video.video_id)
-        if not shots:
-            raise SamplingError(
-                f"'{video.video_id}' has no shots in '{shots_manifest}'; "
-                "run shot detection over the same probe manifest"
-            )
+    videos = list(iter_video_rows(videos_manifest))
+    if not videos:
+        raise SamplingError(f"no videos in '{videos_manifest}'")
 
-        sampled = sample_video(
-            video,
-            shots,
-            output_dir,
-            frames_per_second=frames_per_second,
-            boundary_inset=boundary_inset,
-            sharpness_window=sharpness_window,
-            max_height=max_height,
-            qscale=qscale,
+    done = existing_video_ids(out_path) if resume else set()
+    pending = [video for video in videos if video.video_id not in done][:limit]
+
+    # Checked against `pending`, not every video in the probe manifest. Shot
+    # detection has its own --resume and --limit, so the two stages are
+    # routinely at different points in the corpus; demanding shots for videos
+    # this run will not touch would make a trial slice impossible.
+    missing = [
+        video.video_id for video in pending if not shots_by_video.get(video.video_id)
+    ]
+    if missing:
+        raise SamplingError(
+            f"'{missing[0]}' has no shots in '{shots_manifest}'; "
+            "run shot detection over the same probe manifest"
         )
-        rows.extend(sampled)
+
+    work = partial(
+        _sample_one,
+        shots_by_video=shots_by_video,
+        output_dir=output_dir,
+        frames_per_second=frames_per_second,
+        boundary_inset=boundary_inset,
+        sharpness_window=sharpness_window,
+        max_height=max_height,
+        qscale=qscale,
+        frames_per_shot=frames_per_shot,
+    )
+    results = parallel.map_videos(
+        work, pending, parallel.resolve_workers(workers), desc="sampling"
+    )
+
+    total = count_rows(out_path) if resume and Path(out_path).is_file() else 0
+    pending_rows: list[KeyframeManifestRow] = []
+    appending = resume
+
+    for video, sampled in results:
+        pending_rows.extend(sampled)
         if on_progress is not None:
             on_progress(video.video_id, len(sampled))
 
-    if not rows:
-        raise SamplingError(f"no videos in '{videos_manifest}'")
+        if len(pending_rows) >= flush_every:
+            total = write_rows(
+                _by_keyframe(pending_rows),
+                out_path,
+                KEYFRAME_ARROW_SCHEMA,
+                append=appending,
+            )
+            pending_rows = []
+            appending = True
 
-    return write_rows(rows, out_path, KEYFRAME_ARROW_SCHEMA)
+    if pending_rows or not appending:
+        total = write_rows(
+            _by_keyframe(pending_rows),
+            out_path,
+            KEYFRAME_ARROW_SCHEMA,
+            append=appending,
+        )
+    return total
+
+
+def _sample_one(
+    video: VideoManifestRow,
+    shots_by_video: dict[str, list[ClipManifestRow]],
+    output_dir: str,
+    frames_per_second: float,
+    boundary_inset: float,
+    sharpness_window: int,
+    max_height: int,
+    qscale: int,
+    frames_per_shot: int | None,
+) -> list[KeyframeManifestRow]:
+    """Module-level so the spawn context can pickle it into a worker."""
+    return sample_video(
+        video,
+        shots_by_video[video.video_id],
+        output_dir,
+        frames_per_second=frames_per_second,
+        boundary_inset=boundary_inset,
+        sharpness_window=sharpness_window,
+        max_height=max_height,
+        qscale=qscale,
+        frames_per_shot=frames_per_shot,
+    )
+
+
+def _by_keyframe(rows: list[KeyframeManifestRow]) -> list[KeyframeManifestRow]:
+    """Stable order within a flush, since workers finish out of order."""
+    return sorted(rows, key=lambda row: (row.video_id, row.keyframe_n))
 
 
 def main() -> None:
@@ -348,6 +469,29 @@ def main() -> None:
         default=DEFAULT_BOUNDARY_INSET,
         help=f"fraction trimmed from each shot end (default {DEFAULT_BOUNDARY_INSET})",
     )
+    parser.add_argument(
+        "--frames-per-shot",
+        type=int,
+        default=None,
+        help="fixed keyframes per shot; overrides --frames-per-second",
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="skip videos already in --out and append the rest",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="sample at most this many new videos, for a trial slice",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        help="worker processes; defaults to one fewer than the core count",
+    )
     args = parser.parse_args()
 
     def report(video_id: str, count: int) -> None:
@@ -364,6 +508,10 @@ def main() -> None:
         max_height=args.max_height,
         qscale=args.qscale,
         on_progress=report,
+        frames_per_shot=args.frames_per_shot,
+        resume=args.resume,
+        limit=args.limit,
+        workers=args.workers,
     )
     print(f"wrote {count} keyframes to {args.out}")
 

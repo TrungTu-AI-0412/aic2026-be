@@ -1,10 +1,13 @@
 """SearchService backed by Qdrant."""
 
+from dataclasses import replace
+
 from starlette.concurrency import run_in_threadpool
 
 from app.retrieval import tracks
 from app.retrieval.engine import RetrievalConfig
 from app.schemas.search import (
+    AsrOverrides,
     KisSearchRequest,
     QaSearchRequest,
     SearchResponse,
@@ -23,11 +26,34 @@ class QdrantSearchService:
     def __init__(self, config: RetrievalConfig) -> None:
         self._config = config
 
+    def _resolve(self, request: AsrOverrides) -> RetrievalConfig:
+        """Apply this request's overrides on top of the configured defaults.
+
+        Done here rather than in `engine.retrieve`, whose signature the track
+        modules and their tests depend on. The config is frozen, so `replace`
+        yields a per-request copy and one query can never leak its tuning into
+        the next.
+        """
+        overrides = {
+            field: value
+            for field, value in request.model_dump(
+                include=set(AsrOverrides.model_fields)
+            ).items()
+            if value is not None
+        }
+        return replace(self._config, **overrides) if overrides else self._config
+
     async def search_kis(self, request: KisSearchRequest) -> SearchResponse:
-        return await run_in_threadpool(tracks.search_kis, request, self._config)
+        return await run_in_threadpool(
+            tracks.search_kis, request, self._resolve(request)
+        )
 
     async def search_qa(self, request: QaSearchRequest) -> SearchResponse:
-        return await run_in_threadpool(tracks.search_qa, request, self._config)
+        return await run_in_threadpool(
+            tracks.search_qa, request, self._resolve(request)
+        )
 
     async def search_trake(self, request: TrakeSearchRequest) -> SearchResponse:
-        return await run_in_threadpool(tracks.search_trake, request, self._config)
+        return await run_in_threadpool(
+            tracks.search_trake, request, self._resolve(request)
+        )
