@@ -208,6 +208,65 @@ def rank(
         timings.record("rerank", started)
 
 
+def retrieve_per_video(
+    text: str,
+    video_ids: list[str],
+    limit: int,
+    config: RetrievalConfig,
+    timings: Timings,
+) -> dict[str, list[ScoredFrame]]:
+    """Top `limit` hits for `text` inside each of `video_ids`, keyed by video.
+
+    One encode, then one filtered query per video. A single query filtered to
+    all the videos at once would return the global top-N *across* them, which
+    starves a correct video that ranks low overall - the same recall failure
+    the caller's two-stage split exists to fix, one level down.
+
+    Shots are deliberately not collapsed. `dedupe_by_shot` keeps one frame per
+    shot, and two events of a TRAKE query can happen inside one two-second
+    shot, so collapsing would make that sequence unrepresentable rather than
+    merely rank it worse.
+    """
+    if not video_ids:
+        return {}
+
+    vector = encode_query(text, config, timings)
+    sparse_query = encode_query_sparse(text, config)
+
+    per_video = {
+        video_id: search_vector(
+            vector, limit, config, timings, [video_id], sparse_query
+        )
+        for video_id in video_ids
+    }
+
+    # One speech query for the whole candidate set, and one bonus pass over the
+    # flattened hits. `apply_asr_bonus` min-max normalises the segments it is
+    # given, so boosting each video from its own segment list would make the
+    # bonuses incomparable between videos - exactly what ranking them needs.
+    segments = search_speech(text, limit, config, timings, video_ids)
+    if segments:
+        started = time.perf_counter()
+        try:
+            boosted = asr.apply_asr_bonus(
+                [hit for hits in per_video.values() for hit in hits],
+                segments,
+                config.asr_weight,
+                config.asr_pad_sec,
+            )
+        finally:
+            timings.record("asr_bonus", started)
+        per_video = {video_id: [] for video_id in video_ids}
+        for hit in boosted:
+            if hit.video_id in per_video:
+                per_video[hit.video_id].append(hit)
+
+    return {
+        video_id: sorted(hits, key=lambda hit: hit.score, reverse=True)[:limit]
+        for video_id, hits in per_video.items()
+    }
+
+
 def retrieve(
     text: str,
     top_k: int,
