@@ -52,7 +52,30 @@ class TrakeSearchRequest(AsrOverrides):
     task: Literal["trake"]
     overview: str = Field(min_length=1)
     events: list[str] = Field(min_length=1)
-    top_k: int = Field(default=100, ge=1, le=100)
+    top_k: int = Field(
+        default=100,
+        ge=1,
+        le=100,
+        description=(
+            "Sequences to return. Effectively capped by the number of candidate"
+            " videos the overview stage keeps."
+        ),
+    )
+    video_ids: list[str] | None = Field(
+        default=None,
+        description=(
+            "Search only these videos, skipping video selection entirely. For an"
+            " operator who already found the video with a KIS query."
+        ),
+    )
+    max_gap_sec: float | None = Field(
+        default=None,
+        ge=0.0,
+        description=(
+            "Widest gap in seconds between consecutive events. 0 disables the"
+            " check; None uses the configured default."
+        ),
+    )
 
 
 SearchRequest = Annotated[
@@ -61,12 +84,36 @@ SearchRequest = Annotated[
 ]
 
 
+class EventCandidate(BaseModel):
+    """One frame proposed for one TRAKE event."""
+
+    frame_id: int
+    shot_id: int
+    pts_sec: float | None = None
+    score: float
+
+
+class EventHit(EventCandidate):
+    """The frame chosen for an event, plus the ones it beat.
+
+    `alternates` are bounded by the neighbouring events' chosen frames, so an
+    operator swapping one in cannot produce an out-of-order submission.
+    """
+
+    event_index: int
+    alternates: list[EventCandidate] = Field(default_factory=list)
+
+
 class SearchResult(BaseModel):
     rank: int
     video_id: str
     frame_ids: list[int]
     answer: str | None = None
     score: float
+    # TRAKE only, and additive: `frame_ids` keeps its meaning, so a client that
+    # ignores this field is unaffected. Four bare integers cannot tell an
+    # operator which event landed where in time, which is what this carries.
+    events: list[EventHit] | None = None
 
 
 class SearchVersions(BaseModel):

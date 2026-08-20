@@ -38,3 +38,37 @@ class ClipRequest(BaseModel):
     def frame_range(self) -> tuple[int, int]:
         has_range = self.start_frame is not None and self.end_frame is not None
         return self._frame_range(has_range)
+
+
+class NeighbourFrame(BaseModel):
+    """A keyframe next to the one being verified, ordered by frame index."""
+
+    frame_id: int
+    keyframe_n: int
+    pts_sec: float
+    shot_id: int
+    is_same_shot: bool
+
+
+class FrameContext(BaseModel):
+    """Everything the verify panel shows about one retrieved keyframe.
+
+    `frame_id` is `original_frame_id` — what a submission reports. It is not a
+    key: two keyframes of the same video can share one, so `keyframe_n` is the
+    identity and the first match wins here.
+    """
+
+    video_id: str
+    frame_id: int
+    keyframe_n: int
+    pts_sec: float
+    shot_id: int
+    shot_start_sec: float
+    shot_end_sec: float
+    shot_start_frame: int
+    shot_end_frame: int
+    fps: float
+    duration_sec: float
+    width: int
+    height: int
+    neighbours: list[NeighbourFrame]

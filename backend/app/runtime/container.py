@@ -52,7 +52,12 @@ async def build_container(settings: Settings) -> Container:
             db_path=settings.INGESTION_DB_PATH,
             data_root=settings.INGESTION_DATA_ROOT,
         ),
-        media_service=LocalMediaService(data_root=settings.INGESTION_DATA_ROOT),
+        media_service=LocalMediaService(
+            data_root=settings.INGESTION_DATA_ROOT,
+            videos_manifest=settings.MEDIA_VIDEOS_MANIFEST,
+            keyframes_dir=settings.MEDIA_KEYFRAMES_DIR,
+            frames_manifest=settings.MEDIA_FRAMES_MANIFEST,
+        ),
         submission_service=LocalSubmissionService(
             bounds_manifest=settings.SUBMISSION_BOUNDS_PATH
             or str(Path(settings.INGESTION_DATA_ROOT) / "video_bounds.parquet")

@@ -227,6 +227,113 @@
         }
       }
     },
+    "/api/v1/videos/{video_id}/frames/{frame_id}/context": {
+      "get": {
+        "tags": [
+          "Media"
+        ],
+        "summary": "Get Frame Context",
+        "description": "Metadata for one keyframe plus its neighbouring keyframes.\n\nOne request per verify panel: the neighbour thumbnails are then plain\n`/frames/{frame_id}` reads and the clip preview is `/stream#t=pts_sec`.",
+        "operationId": "get_frame_context_api_v1_videos__video_id__frames__frame_id__context_get",
+        "parameters": [
+          {
+            "name": "video_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Video Id"
+            }
+          },
+          {
+            "name": "frame_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Frame Id"
+            }
+          },
+          {
+            "name": "radius",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 25,
+              "minimum": 0,
+              "description": "Neighbouring keyframes each side.",
+              "default": 5,
+              "title": "Radius"
+            },
+            "description": "Neighbouring keyframes each side."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FrameContext"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/videos/{video_id}/stream": {
+      "get": {
+        "tags": [
+          "Media"
+        ],
+        "summary": "Stream Video",
+        "description": "Stream the source video for in-place playback.\n\nSeek on the client: `<video src=\".../stream#t=12.5\">`. FileResponse honours\nRange requests, so the browser pulls only the bytes around that timestamp\ninstead of the file, and nothing is decoded or re-encoded server side.",
+        "operationId": "stream_video_api_v1_videos__video_id__stream_get",
+        "parameters": [
+          {
+            "name": "video_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Video Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/videos/{video_id}/clip": {
       "get": {
         "tags": [
@@ -658,6 +765,88 @@
         ],
         "title": "FeatureProfileOption"
       },
+      "FrameContext": {
+        "properties": {
+          "video_id": {
+            "type": "string",
+            "title": "Video Id"
+          },
+          "frame_id": {
+            "type": "integer",
+            "title": "Frame Id"
+          },
+          "keyframe_n": {
+            "type": "integer",
+            "title": "Keyframe N"
+          },
+          "pts_sec": {
+            "type": "number",
+            "title": "Pts Sec"
+          },
+          "shot_id": {
+            "type": "integer",
+            "title": "Shot Id"
+          },
+          "shot_start_sec": {
+            "type": "number",
+            "title": "Shot Start Sec"
+          },
+          "shot_end_sec": {
+            "type": "number",
+            "title": "Shot End Sec"
+          },
+          "shot_start_frame": {
+            "type": "integer",
+            "title": "Shot Start Frame"
+          },
+          "shot_end_frame": {
+            "type": "integer",
+            "title": "Shot End Frame"
+          },
+          "fps": {
+            "type": "number",
+            "title": "Fps"
+          },
+          "duration_sec": {
+            "type": "number",
+            "title": "Duration Sec"
+          },
+          "width": {
+            "type": "integer",
+            "title": "Width"
+          },
+          "height": {
+            "type": "integer",
+            "title": "Height"
+          },
+          "neighbours": {
+            "items": {
+              "$ref": "#/components/schemas/NeighbourFrame"
+            },
+            "type": "array",
+            "title": "Neighbours"
+          }
+        },
+        "type": "object",
+        "required": [
+          "video_id",
+          "frame_id",
+          "keyframe_n",
+          "pts_sec",
+          "shot_id",
+          "shot_start_sec",
+          "shot_end_sec",
+          "shot_start_frame",
+          "shot_end_frame",
+          "fps",
+          "duration_sec",
+          "width",
+          "height",
+          "neighbours"
+        ],
+        "title": "FrameContext",
+        "description": "Everything the verify panel shows about one retrieved keyframe.\n\n`frame_id` is `original_frame_id` \u2014 what a submission reports. It is not a\nkey: two keyframes of the same video can share one, so `keyframe_n` is the\nidentity and the first match wins here."
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -926,6 +1115,40 @@
           "description"
         ],
         "title": "KisSearchRequest"
+      },
+      "NeighbourFrame": {
+        "properties": {
+          "frame_id": {
+            "type": "integer",
+            "title": "Frame Id"
+          },
+          "keyframe_n": {
+            "type": "integer",
+            "title": "Keyframe N"
+          },
+          "pts_sec": {
+            "type": "number",
+            "title": "Pts Sec"
+          },
+          "shot_id": {
+            "type": "integer",
+            "title": "Shot Id"
+          },
+          "is_same_shot": {
+            "type": "boolean",
+            "title": "Is Same Shot"
+          }
+        },
+        "type": "object",
+        "required": [
+          "frame_id",
+          "keyframe_n",
+          "pts_sec",
+          "shot_id",
+          "is_same_shot"
+        ],
+        "title": "NeighbourFrame",
+        "description": "A keyframe next to the one being verified, ordered by frame index."
       },
       "QaCandidate": {
         "properties": {

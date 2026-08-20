@@ -78,5 +78,13 @@ class Settings(BaseSettings):
     # the file is missing the export still works, just without the check.
     SUBMISSION_BOUNDS_PATH: Optional[str] = None
 
+    # Keyframe JPEGs and the video probe manifest the media endpoints read.
+    # Both default under INGESTION_DATA_ROOT, but a re-ingest writes to a new
+    # versioned directory, so point these at whatever the active collection
+    # was built from.
+    MEDIA_KEYFRAMES_DIR: Optional[str] = None
+    MEDIA_VIDEOS_MANIFEST: Optional[str] = None
+    MEDIA_FRAMES_MANIFEST: Optional[str] = None
+
 
 settings = Settings()
