@@ -3,7 +3,10 @@ import pytest
 from app.core.config import settings
 from app.ingestion.service import SqliteIngestionService
 from app.schemas.ingestions import CreateIngestionJobRequest, IngestionEntity
-from app.services.ingestions import UnsupportedFeatureProfileError
+from app.services.ingestions import (
+    ManifestPathNotAllowedError,
+    UnsupportedFeatureProfileError,
+)
 
 
 pytestmark = pytest.mark.anyio
@@ -49,5 +52,35 @@ async def test_rejects_unregistered_feature_profile_before_queuing(service, tmp_
                 manifest_path=str(manifest),
                 collection_name="aic2026-frames-invalid",
                 feature_profile="not-a-real-profile",
+            )
+        )
+
+
+async def test_relative_manifest_path_resolves_against_data_root(service, tmp_path):
+    # `ingest_all.sh` passes paths relative to INGESTION_DATA_ROOT; resolving
+    # them against the API process CWD instead rejected every one of them.
+    (tmp_path / "manifests-v2").mkdir()
+    (tmp_path / "manifests-v2/frames.parquet").touch()
+
+    response = await service.create_job(
+        CreateIngestionJobRequest(
+            entity=IngestionEntity.FRAMES,
+            manifest_path="manifests-v2/frames.parquet",
+            collection_name="aic2026-frames-relative",
+            feature_profile="clip-b32-v1",
+        )
+    )
+
+    assert response.job_id.startswith("ing-")
+
+
+async def test_rejects_manifest_path_escaping_data_root(service):
+    with pytest.raises(ManifestPathNotAllowedError, match="outside"):
+        await service.create_job(
+            CreateIngestionJobRequest(
+                entity=IngestionEntity.FRAMES,
+                manifest_path="../etc/passwd",
+                collection_name="aic2026-frames-escape",
+                feature_profile="clip-b32-v1",
             )
         )
