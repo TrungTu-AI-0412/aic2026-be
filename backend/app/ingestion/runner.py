@@ -19,7 +19,9 @@ def run(job_id: str, db_path: str) -> None:
         total = pipeline.validate_manifest(job["manifest_path"], entity)
 
         store.update_job(db_path, job_id, stage="creating_collection")
-        pipeline.create_collection(job["collection_name"], job["feature_profile"])
+        pipeline.create_collection(
+            job["collection_name"], job["feature_profile"], entity
+        )
 
         store.update_job(db_path, job_id, stage="creating_payload_indexes")
         pipeline.create_payload_indexes(job["collection_name"], entity)

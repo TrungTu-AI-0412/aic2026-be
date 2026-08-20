@@ -36,13 +36,22 @@ python -c "import json; from pathlib import Path; from app.main import create_ap
 Preprocessing CLIs (each writes a Parquet manifest; `--resume` is supported by
 probe and shot detection):
 
+All three video stages take `--workers` (default 3) and `--resume`, and flush
+their manifest periodically, so an interrupted run is re-entrant.
+
 ```bash
-python -m app.ingestion.video.probe --source DIR --out videos.parquet --resume
-python -m app.ingestion.video.shot_detect --videos-manifest videos.parquet --out clips.parquet --detector transnetv2 --resume
-python -m app.ingestion.video.sampling --videos-manifest videos.parquet --shots-manifest clips.parquet --output-dir keyframes/ --out frames.parquet
+python -m app.ingestion.video.probe --source DIR --out videos.parquet --workers 3 --resume
+python -m app.ingestion.video.shot_detect --videos-manifest videos.parquet --out clips.parquet --detector transnetv2 --workers 3 --resume
+python -m app.ingestion.video.sampling --videos-manifest videos.parquet --shots-manifest clips.parquet --output-dir keyframes/ --frames-per-shot 3 --out frames.parquet --workers 3 --resume
 python -m app.ingestion.batch_builder keyframes|shots ...   # import externally produced artifacts
 python -m app.ingestion.runner --job-id ing-xxxx            # normally spawned by the API
 python3 ../scripts/qdrant_snapshot.py create|restore ...    # collection hand-off between machines
+```
+
+Full rebuild from raw video, ~9 hours under tmux (see `docs/data-pipeline.md` §8):
+
+```bash
+./scripts/ingest_all.sh
 ```
 
 Repo-root tools for the AIC 2025 batch-1 dataset (run from the repo root, not
@@ -57,7 +66,13 @@ python scripts/build_frames_manifest.py --map-keyframes DIR --shots DIR \
     --out-videos video_bounds.parquet
 python scripts/join_ocr.py --ocr data/ocr_raw/ocr   # fold OCR into both manifests
 python scripts/build_eval_set.py --limit 300      # candidate eval queries
+python scripts/build_asr_manifest.py --transcripts data/transcripts --out asr_segments.parquet
 ```
+
+`build_frames_manifest.py` needs `--map-keyframes` and the organiser's keyframe
+images. **Neither is on this machine**, so it cannot be run here: every path in
+the old `frames.parquet` points at a missing file. Rebuild from `data/videos`
+instead, via the three video CLIs above.
 
 Evaluation (`app/eval/`) scores a run of that set. `app.eval.runner` is the
 ablation harness — each flag disables one retrieval component and the summaries
@@ -96,9 +111,14 @@ event loop. `engine.retrieve()` is the one shared path for every track:
    over-fetched by `dedupe.DEFAULT_OVERFETCH`
 3. `fusion.fuse_frames_and_clips` → combines both lists on `(video_id, shot_id)`,
    imputing each list's worst observed score for one-sided shots
-4. `dedupe.dedupe_by_shot` → one hit per shot, since ~1 keyframe/sec means a
-   single shot produces many near-identical vectors
-5. `rerank.rerank` → BLIP ITM cross-encoder over the top `RERANK_TOP_N`; the
+4. `ranking.asr.apply_asr_bonus` → adds `asr_weight ×` the best-scoring speech
+   segment whose time range covers each frame. Before dedupe on purpose, so
+   speech decides *which* frame represents a shot as well as where it ranks.
+   Additive, never multiplicative: 22 of 873 videos have no transcript, so
+   silence is not evidence against a frame
+5. `dedupe.dedupe_by_shot` → one hit per shot, since several keyframes per shot
+   produce many near-identical vectors
+6. `rerank.rerank` → BLIP ITM cross-encoder over the top `RERANK_TOP_N`; the
    reranked head stays a block because ITM probabilities are not comparable
    with the cosine scores below it
 
@@ -133,9 +153,23 @@ rows that could never score, against the per-video frame bounds in
 `scripts/build_frames_manifest.frame_upper_bound`. A missing bounds file
 disables the check rather than failing the export.
 
+**Collections** are two, not one. A speech segment is a time *range* and a
+keyframe is an *instant*, so they share no key: `frames` holds `dense_video`
+(image) plus reserved `dense_text`/`ocr` slots, and `asr` holds `dense_text`
+(Qwen3-Embedding-0.6B) plus a populated `speech` sparse vector. Frames declare
+**no** `speech` slot — pooling ASR onto frames as well would score the same
+speech twice, once through Qdrant RRF and once through the overlap bonus. Every
+slot is declared at creation because Qdrant cannot add a vector to an existing
+collection, so a slot declared now is a re-upsert later instead of re-embedding
+293k points. While `ocr` is unpopulated, frame search is dense-only and
+`sparse_names` must stay empty: querying an empty slot raises.
+
 **Feature profiles** (`app/features/profiles.py`) are the contract that ties a
 collection to a query. `FEATURE_PROFILE` in `.env` must match the profile the
-active collection was ingested with — same model, same dimension, same space.
+active collection was ingested with — same model, same dimension, same space; a
+mismatch returns plausible nonsense rather than an error. `kind` separates image
+profiles from text ones, and the slot a job writes is sized from that job's own
+profile, so the same manifest can be ingested under two models and compared.
 Model runtimes are `lru_cache`d and auto-select cuda/mps/cpu with fp16/fp32.
 All vectors are L2-normalized (mean-pooled then re-normalized for clips), so
 cosine similarity is a dot product.
@@ -153,6 +187,11 @@ types.
   collection during competition mode.
 - This is a single-team competition tool, not a multi-user production
   system: do not add validation/snapshot/activation gating to ingestion.
+- Video decode stays single-threaded (`thread_type = "NONE"`); parallelise with
+  processes. PyAV's log callback takes the GIL from a decoder thread while the
+  main thread holds it inside `avcodec_free_context()` — a real deadlock, see
+  `app/features/media.py`. Processes are also faster here: 3 × 428 fps beats the
+  705 fps threaded decode measured.
 - Parquet manifests remain the rebuild/audit source of truth;
   `docs/data-pipeline.md` is the current state of that data — what is in
   each column, where it came from, and what is still missing.
@@ -170,6 +209,10 @@ types.
 - `AGENTS.md` is a copy of this file; keep the two in sync.
 
 ## Known gaps
+
+- Ingestion has no resume: a failed upsert re-embeds from row 0, and the
+  collection is created unconditionally so a retry over an existing one raises.
+  The three video stages *do* resume, per video.
 
 - `batch_builder.scan_clips` raises `NotImplementedError` pending a clip file
   naming convention.

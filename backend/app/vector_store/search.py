@@ -32,6 +32,29 @@ class ScoredFrame:
     # source video, and that needs timestamps, not frame indexes.
     start_sec: float | None = None
     end_sec: float | None = None
+    # Keyframe points: when in the video this frame is, and the span of the shot
+    # it came from. Both are read by the ASR overlap bonus, which has to ask
+    # whether a stretch of speech covers this frame. They were already in the
+    # payload and simply discarded before.
+    pts_sec: float | None = None
+    shot_start_sec: float | None = None
+    shot_end_sec: float | None = None
+
+    def time_window(self, pad_sec: float = 0.0) -> tuple[float, float] | None:
+        """The span of video time this hit covers, or None if unknown.
+
+        Prefers the shot range, falling back to the frame's own instant. A
+        keyframe is a single moment but the speech describing it runs either
+        side, so an instant alone would match almost no segment.
+        """
+        if self.shot_start_sec is not None and self.shot_end_sec is not None:
+            if self.shot_end_sec > self.shot_start_sec:
+                return (self.shot_start_sec - pad_sec, self.shot_end_sec + pad_sec)
+        if self.start_sec is not None and self.end_sec is not None:
+            return (self.start_sec - pad_sec, self.end_sec + pad_sec)
+        if self.pts_sec is not None:
+            return (self.pts_sec - pad_sec, self.pts_sec + pad_sec)
+        return None
 
     @property
     def representative_frame(self) -> int:
@@ -43,6 +66,23 @@ class ScoredFrame:
         if self.original_frame_id is not None:
             return self.original_frame_id
         return self.start_frame or 0
+
+
+@dataclass(frozen=True)
+class AsrSegment:
+    """One speech segment retrieved from the ASR collection.
+
+    Lives here beside `ScoredFrame` for the same reason: search returns plain
+    dataclasses so ranking and the API never import Qdrant types. Ranking
+    depends on this module, never the other way round.
+    """
+
+    score: float
+    video_id: str
+    start_sec: float
+    end_sec: float
+    segment: int = 0
+    text: str = ""
 
 
 def build_filter(
@@ -75,10 +115,8 @@ def search(
     limit: int = DEFAULT_LIMIT,
     query_filter: qmodels.Filter | None = None,
     sparse_query: SparseVector | None = None,
-    sparse_names: Sequence[str] = (
-        collections.SPARSE_SPEECH,
-        collections.SPARSE_OCR,
-    ),
+    sparse_names: Sequence[str] = (),
+    dense_name: str = collections.DENSE_VECTOR_NAME,
 ) -> list[ScoredFrame]:
     """Dense search, fused with lexical search when the query has terms.
 
@@ -91,18 +129,25 @@ def search(
     common scale — a weighted sum of the two would be dominated by whichever
     happens to have the wider range on a given query.
 
-    `sparse_names` covers the slots that hold vectors, not every declared one.
-    `caption` stays out: the collection declares it so it can be filled by a
-    later re-upsert, but querying a slot no point carries is wasted work
-    against a server and raises outright against the in-memory client, which
-    only registers a slot's IDF statistics once a point uses it. Narrow this
-    argument when ingesting a manifest that predates OCR.
+    `sparse_names` covers the slots that actually hold vectors, not every slot
+    the collection declares. It defaults to empty because querying a slot no
+    point carries is wasted work against a server and raises outright against
+    the in-memory client, which only registers a slot's IDF statistics once a
+    point uses it. Frames declare `ocr` but do not populate it yet, so callers
+    pass the names in explicitly once they are filled.
+
+    `dense_name` selects the dense space to search: frames hold image vectors in
+    `dense_video`, ASR segments hold text vectors in `dense_text`, and the two
+    are different dimensions.
     """
-    if sparse_query:
+    # Both are needed for the hybrid path: a lexical query with nowhere to match
+    # would fuse a single ranked list with itself, paying for RRF to change
+    # nothing.
+    if sparse_query and sparse_names:
         prefetch = [
             qmodels.Prefetch(
                 query=vector,
-                using=collections.DENSE_VECTOR_NAME,
+                using=dense_name,
                 limit=limit,
                 filter=query_filter,
             )
@@ -129,12 +174,71 @@ def search(
         response = client.query_points(
             collection_name=collection_name,
             query=vector,
-            using=collections.DENSE_VECTOR_NAME,
+            using=dense_name,
             limit=limit,
             query_filter=query_filter,
             with_payload=True,
         )
     return [_to_scored_frame(point) for point in response.points]
+
+
+def search_asr(
+    client: QdrantClient,
+    collection_name: str,
+    vector: list[float] | None,
+    sparse_query: SparseVector | None,
+    limit: int = DEFAULT_LIMIT,
+    query_filter: qmodels.Filter | None = None,
+) -> tuple[list[AsrSegment], list[AsrSegment]]:
+    """Search the speech collection, returning the two branches separately.
+
+    Deliberately *not* fused server-side. The dense and lexical halves have to
+    be combined with an explicit weight, and Qdrant's RRF fuses ranks with no
+    weight to give, so `ranking.asr.fuse_asr` does it once both lists are back.
+
+    Either branch may be skipped by passing None, which is how the toggles turn
+    a hybrid speech query into a purely dense or purely lexical one.
+    """
+    dense_hits: list[AsrSegment] = []
+    sparse_hits: list[AsrSegment] = []
+
+    if vector is not None:
+        response = client.query_points(
+            collection_name=collection_name,
+            query=vector,
+            using=collections.DENSE_TEXT_NAME,
+            limit=limit,
+            query_filter=query_filter,
+            with_payload=True,
+        )
+        dense_hits = [_to_asr_segment(point) for point in response.points]
+
+    if sparse_query:
+        response = client.query_points(
+            collection_name=collection_name,
+            query=qmodels.SparseVector(
+                indices=sparse_query.indices, values=sparse_query.values
+            ),
+            using=collections.SPARSE_SPEECH,
+            limit=limit,
+            query_filter=query_filter,
+            with_payload=True,
+        )
+        sparse_hits = [_to_asr_segment(point) for point in response.points]
+
+    return dense_hits, sparse_hits
+
+
+def _to_asr_segment(point) -> AsrSegment:
+    payload = point.payload or {}
+    return AsrSegment(
+        score=float(point.score),
+        video_id=str(payload.get("video_id", "")),
+        start_sec=float(payload.get("start_sec") or 0.0),
+        end_sec=float(payload.get("end_sec") or 0.0),
+        segment=int(payload.get("segment") or 0),
+        text=str(payload.get("text_corrected") or ""),
+    )
 
 
 def _to_scored_frame(point) -> ScoredFrame:
@@ -149,6 +253,9 @@ def _to_scored_frame(point) -> ScoredFrame:
         path=payload.get("path"),
         start_sec=_optional_float(payload.get("start_sec")),
         end_sec=_optional_float(payload.get("end_sec")),
+        pts_sec=_optional_float(payload.get("pts_sec")),
+        shot_start_sec=_optional_float(payload.get("shot_start_sec")),
+        shot_end_sec=_optional_float(payload.get("shot_end_sec")),
     )
 
 
