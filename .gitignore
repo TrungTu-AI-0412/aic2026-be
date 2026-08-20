@@ -11,3 +11,4 @@ data/*
 !data/ARTIFACTS.md
 artifacts/
 *.npy
+*.log

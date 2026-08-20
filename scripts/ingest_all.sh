@@ -122,10 +122,14 @@ if ! curl -sf "$API/health/ready" >/dev/null 2>&1; then
 fi
 
 queue() {
-    curl -sf -X POST "$API/ingestions" -H 'content-type: application/json' \
+    # Body captured rather than piped straight into python: a 4xx from the API
+    # otherwise surfaced as a JSONDecodeError on empty stdin, hiding the reason.
+    local body
+    body=$(curl -s -X POST "$API/ingestions" -H 'content-type: application/json' \
         -d "{\"entity\":\"$1\",\"manifest_path\":\"$2\",\
-             \"collection_name\":\"$3\",\"feature_profile\":\"$4\"}" \
-    | python -c 'import json,sys; print(json.load(sys.stdin)["job_id"])'
+             \"collection_name\":\"$3\",\"feature_profile\":\"$4\"}")
+    python -c 'import json,sys; print(json.load(sys.stdin)["job_id"])' <<<"$body" \
+        || { echo "queueing $1 failed: $body" >&2; return 1; }
 }
 
 wait_for() {
