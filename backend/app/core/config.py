@@ -73,14 +73,16 @@ class Settings(BaseSettings):
     RERANK_TOP_N: int = 30
     RERANK_MODEL: str = "Salesforce/blip-itm-large-coco"
 
-    # Query rewriting. An LLM translates the query to English and strips the
-    # operator's phrasing ("hãy tìm trong video...") before it is encoded,
-    # because the image space and the reranker are both English-centric. The
-    # speech stage keeps the original: the transcripts are Vietnamese.
-    # This is the one network hop the query path takes, so it is on a short
-    # timeout and any failure falls back to the query as typed.
+    # Query rewriting. One LLM call returns two forms of every query: translated
+    # to English for the image space and the reranker, which are both
+    # English-centric, and merely stripped of the operator's phrasing ("hãy tìm
+    # trong video...") for the speech stage, whose transcripts are Vietnamese.
+    # This is the one network hop the query path takes, so any failure falls
+    # back to the query as typed. The timeout has to cover a whole TRAKE batch:
+    # the step is output-token-bound, and an overview plus five events in two
+    # forms measured ~3.2s.
     QUERY_REWRITE_ENABLED: bool = True
-    QUERY_REWRITE_TIMEOUT_SEC: float = 3.0
+    QUERY_REWRITE_TIMEOUT_SEC: float = 6.0
     # OpenAI-compatible chat completions endpoint, including the /v1. Unset
     # leaves rewriting a silent no-op even with QUERY_REWRITE_ENABLED=true.
     VLM_BASE_URL: Optional[str] = None

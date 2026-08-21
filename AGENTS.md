@@ -666,31 +666,44 @@ Current shared stages are:
 ```text
 rewrite.rewrite_queries
   -> VLM_BASE_URL /chat/completions
-  -> English, artifact-free query
+  -> Rewrite(vision=<English>, speech=<original, cleaned>)
 ```
 
 Runs in `tracks.py`, ahead of the engine, and rewrites every query of the
 request in one call — a TRAKE overview plus N events is one round trip, not
-N+1. The LLM translates to English and drops the operator's phrasing ("hãy tìm
-trong video…", question forms, quotes, numbering), because SigLIP2 and the BLIP
-reranker are both English-centric and would otherwise score that wrapper as
-part of the scene.
+N+1. Each query comes back in **two** forms, because the two collections want
+opposite things from the same string:
+
+- `vision` — translated to English, describing only what is in the frame. This
+  is what `encode_query` and the BLIP reranker get: both are English-centric
+  and would otherwise score "hãy tìm trong video" as part of the scene.
+- `speech` — the query in its **original language**, with only the
+  meta-instructions removed; no translation, paraphrase, reordering or spelling
+  correction. This is what `search_speech` gets. Translating for it would drop
+  the lexical half of the speech search to nothing, since the transcripts are
+  Vietnamese; leaving it as typed makes `hãy`, `tìm`, `trong`, `video`, `đoạn`,
+  `có` live BM25 terms scoring against those transcripts.
+
+`retrieve(text, ..., speech_text=)` and `retrieve_per_video` are where the two
+part company. A caller that passes only `text` gets the old behaviour, one
+string for both.
 
 This is the only network hop on the query path, so:
 
-- the timeout is short (`QUERY_REWRITE_TIMEOUT_SEC`);
-- **every** failure — unreachable box, timeout, misnumbered output — returns
-  `None` and the query is searched exactly as typed;
+- the timeout (`QUERY_REWRITE_TIMEOUT_SEC`, default 6s) has to cover a whole
+  TRAKE batch, not one query — the step is output-token-bound, and an overview
+  plus five events in two forms measured 1.8s;
+- **every** failure — unreachable box, timeout, misnumbered output, a line
+  missing its ` || ` separator — returns `None` and the query is searched
+  exactly as typed on both sides;
 - a partial parse is treated as a failure, since a shifted line would move a
-  TRAKE event onto the wrong query;
+  TRAKE event onto the wrong query, and a line with only one form gives no way
+  to tell which form it is;
 - successes are `lru_cache`d and failures are not, so the endpoint coming back
   mid-session is picked up on the next query;
-- `SearchResponse.rewritten_queries` reports what was actually encoded, `None`
-  meaning the step did not run.
-
-The speech stage keeps the original text (`retrieve(..., speech_text=)`): the
-transcripts are Vietnamese and are searched by term overlap as well as densely,
-so handing it the translation would drop the lexical half to nothing.
+- `SearchResponse.rewritten_queries` reports the **English** forms, `None`
+  meaning the step did not run. The cleaned form is not reported: it is close
+  enough to the request to read off it.
 
 `docs/research/mervin.md` argues the step away in favour of a Vietnamese-native
 embedding model. That is an argument against SigLIP2, not against translating

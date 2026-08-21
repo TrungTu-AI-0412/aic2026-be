@@ -67,14 +67,17 @@ class RetrievalConfig:
     asr_sparse_weight: float = asr.DEFAULT_SPARSE_WEIGHT
     asr_pad_sec: float = asr.DEFAULT_PAD_SEC
 
-    # Query rewriting: an LLM translates the query to English and strips the
-    # operator's phrasing before it is encoded. No base URL leaves the step a
-    # no-op, so a config that never heard of it - every test below - is unchanged.
+    # Query rewriting: one LLM call returns each query translated for the image
+    # space and stripped of the operator's phrasing for the speech stage. No base
+    # URL leaves the step a no-op, so a config that never heard of it - every
+    # test below - is unchanged.
     rewrite_enabled: bool = True
     rewrite_base_url: str | None = None
     rewrite_model: str = ""
     rewrite_api_key: str = ""
-    rewrite_timeout_sec: float = 3.0
+    # ponytail: flat, not scaled per query. The step is output-token-bound, so a
+    # ten-event TRAKE batch would want `base + n × per_query` instead.
+    rewrite_timeout_sec: float = 6.0
 
 
 def encode_query(text: str, config: RetrievalConfig, timings: Timings) -> list[float]:
@@ -291,9 +294,11 @@ def retrieve(
     """Encode one text query and return deduplicated, reranked hits.
 
     `speech_text` is the form of the query the speech stage should see, when it
-    differs from the one the image space should: rewriting turns a Vietnamese
-    query into English for SigLIP2 and the reranker, but the transcripts are
-    Vietnamese, so speech keeps the original. Defaults to `text`.
+    differs from the one the image space should. Rewriting produces both: `text`
+    is translated for SigLIP2 and the reranker, `speech_text` is the original
+    language with the operator's phrasing stripped, because the transcripts are
+    Vietnamese but "hãy tìm trong video" is not something anyone said in one.
+    Defaults to `text`.
     """
     vector = encode_query(text, config, timings)
     # Frame-side lexical search follows `text`, not `speech_text`. Inert today -
