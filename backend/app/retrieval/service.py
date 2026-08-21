@@ -41,6 +41,11 @@ class QdrantSearchService:
             ).items()
             if value is not None
         }
+        mode = getattr(request, "retrieval_mode", None)
+        if mode == "visual":
+            overrides["asr_enabled"] = False
+        elif mode in ("visual_asr", "asr_only"):
+            overrides["asr_enabled"] = True
         return replace(self._config, **overrides) if overrides else self._config
 
     async def search_kis(self, request: KisSearchRequest) -> SearchResponse:

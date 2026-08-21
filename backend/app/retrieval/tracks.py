@@ -13,16 +13,19 @@ from app.retrieval.engine import (
     Timings,
     retrieve,
     retrieve_per_video,
+    search_asr_only,
 )
 from app.retrieval.rewrite import Rewrite, rewrite_queries
 from app.schemas.search import (
     EventCandidate,
     EventHit,
+    AsrEvidence,
     KisSearchRequest,
     QaSearchRequest,
     SearchResponse,
     SearchResult,
     SearchVersions,
+    RetrievalMode,
     TrakeSearchRequest,
 )
 from app.vector_store.search import ScoredFrame
@@ -45,7 +48,9 @@ TRAKE_MAX_GAP_SEC = 300.0
 
 
 def search_kis(request: KisSearchRequest, config: RetrievalConfig) -> SearchResponse:
-    return _frame_search("kis", request.description, request.top_k, config)
+    return _frame_search(
+        "kis", request.description, request.top_k, config, request.retrieval_mode
+    )
 
 
 def search_qa(request: QaSearchRequest, config: RetrievalConfig) -> SearchResponse:
@@ -56,16 +61,50 @@ def search_qa(request: QaSearchRequest, config: RetrievalConfig) -> SearchRespon
     answer off the frame and types it into the submission. The two tracks stay
     separate endpoints only because they export different row shapes.
     """
-    return _frame_search("qa", request.description, request.top_k, config)
+    return _frame_search(
+        "qa", request.description, request.top_k, config, request.retrieval_mode
+    )
 
 
 def _frame_search(
-    task: str, text: str, top_k: int, config: RetrievalConfig
+    task: str,
+    text: str,
+    top_k: int,
+    config: RetrievalConfig,
+    requested_mode: RetrievalMode | None = None,
 ) -> SearchResponse:
     """One hit per shot, one frame per hit."""
     timings = Timings()
     rewritten = rewrite_queries([text], config, timings)
     query = rewritten[0] if rewritten else Rewrite(text, text)
+    effective_mode: RetrievalMode = requested_mode or (
+        "visual_asr"
+        if config.asr_enabled and config.asr_collection and config.asr_weight > 0
+        else "visual"
+    )
+
+    if effective_mode == "asr_only":
+        hits = search_asr_only(query.speech, top_k, config, timings)
+        results = [
+            SearchResult(
+                rank=rank,
+                video_id=hit.frame.video_id,
+                frame_ids=[hit.frame.representative_frame],
+                score=hit.segment.score,
+                asr_evidence=AsrEvidence(
+                    segment=hit.segment.segment,
+                    text=hit.segment.text,
+                    start_sec=hit.segment.start_sec,
+                    end_sec=hit.segment.end_sec,
+                    score=hit.segment.score,
+                ),
+            )
+            for rank, hit in enumerate(hits, start=1)
+        ]
+        return _response(
+            task, results, config, timings, rewritten, effective_mode
+        )
+
     hits = retrieve(
         query.vision, top_k, config, timings, speech_text=query.speech
     )
@@ -79,7 +118,7 @@ def _frame_search(
         )
         for rank, hit in enumerate(hits, start=1)
     ]
-    return _response(task, results, config, timings, rewritten)
+    return _response(task, results, config, timings, rewritten, effective_mode)
 
 
 def search_trake(request: TrakeSearchRequest, config: RetrievalConfig) -> SearchResponse:
@@ -356,21 +395,31 @@ def _response(
     config: RetrievalConfig,
     timings: Timings,
     rewritten: list[Rewrite] | None = None,
+    effective_mode: RetrievalMode | None = None,
 ) -> SearchResponse:
+    resolved_mode: RetrievalMode = effective_mode or (
+        "visual_asr"
+        if config.asr_enabled and config.asr_collection and config.asr_weight > 0
+        else "visual"
+    )
     return SearchResponse(
         request_id=str(uuid4()),
         task=task,
+        effective_retrieval_mode=resolved_mode,
         results=results,
-        # The English forms only. An operator checking what the model did to
-        # their query is checking the translation; the cleaned form is close
-        # enough to what they typed to read off the request.
+        # Parallel lists preserve request order for both retrieval spaces.
         rewritten_queries=(
             [query.vision for query in rewritten] if rewritten else None
+        ),
+        cleaned_queries=(
+            [query.speech for query in rewritten] if rewritten else None
         ),
         versions=SearchVersions(
             frames_collection=config.frames_collection,
             clips_collection=config.clips_collection,
             model_config_name=config.feature_profile,
+            asr_collection=config.asr_collection,
+            asr_model_config_name=config.asr_profile,
         ),
         latency_ms=timings.as_dict(),
     )

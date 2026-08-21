@@ -4,14 +4,14 @@ from dataclasses import dataclass
 import pytest
 
 from app.retrieval import tracks
-from app.retrieval.engine import RetrievalConfig
+from app.retrieval.engine import AsrOnlyHit, RetrievalConfig
 from app.retrieval.rewrite import Rewrite
 from app.schemas.search import (
     KisSearchRequest,
     QaSearchRequest,
     TrakeSearchRequest,
 )
-from app.vector_store.search import ScoredFrame
+from app.vector_store.search import AsrSegment, ScoredFrame
 
 CONFIG = RetrievalConfig(
     frames_collection="frames-v1",
@@ -479,7 +479,55 @@ class TestRewriting:
         # "hãy tìm trong video" stops scoring as a BM25 term against transcripts.
         assert fake_retrieve.speech_calls == ["VI xe hơi đỏ"]
         assert response.rewritten_queries == ["EN xe hơi đỏ"]
+        assert response.cleaned_queries == ["VI xe hơi đỏ"]
         assert response.results[0].frame_ids == [10]
+
+    def test_asr_only_searches_the_cleaned_form_without_visual_retrieval(
+        self, fake_retrieve, rewriter, monkeypatch
+    ):
+        spoken: list[str] = []
+
+        def _search_asr_only(text, top_k, config, timings):
+            spoken.append(text)
+            return [
+                AsrOnlyHit(
+                    frame=frame(
+                        0.0,
+                        video_id="L01_V002",
+                        shot_id=4,
+                        frame_id=240,
+                        pts_sec=8.0,
+                    ),
+                    segment=AsrSegment(
+                        score=0.92,
+                        video_id="L01_V002",
+                        segment=3,
+                        start_sec=7.5,
+                        end_sec=9.0,
+                        text="nội dung lời thoại",
+                    ),
+                )
+            ]
+
+        monkeypatch.setattr(tracks, "search_asr_only", _search_asr_only)
+
+        response = tracks.search_qa(
+            QaSearchRequest(
+                task="qa",
+                description="hãy tìm lời thoại",
+                retrieval_mode="asr_only",
+            ),
+            CONFIG,
+        )
+
+        assert rewriter == [["hãy tìm lời thoại"]]
+        assert spoken == ["VI hãy tìm lời thoại"]
+        assert fake_retrieve.calls == []
+        assert response.effective_retrieval_mode == "asr_only"
+        assert response.rewritten_queries == ["EN hãy tìm lời thoại"]
+        assert response.cleaned_queries == ["VI hãy tìm lời thoại"]
+        assert response.results[0].frame_ids == [240]
+        assert response.results[0].asr_evidence.text == "nội dung lời thoại"
 
     def test_trake_rewrites_the_whole_request_in_one_call(
         self, fake_retrieve, rewriter
@@ -530,4 +578,5 @@ class TestRewriting:
 
         assert fake_retrieve.calls == ["xe hơi đỏ"]
         assert response.rewritten_queries is None
+        assert response.cleaned_queries is None
         assert response.results[0].frame_ids == [10]

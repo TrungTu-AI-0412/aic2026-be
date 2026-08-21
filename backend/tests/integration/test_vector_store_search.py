@@ -70,6 +70,41 @@ def populated(client, collection_name):
     return collection_name
 
 
+@pytest.fixture
+def temporal_frames(client, collection_name):
+    collections.create_collection(
+        client,
+        collection_name,
+        dense_vectors={collections.DENSE_VECTOR_NAME: VECTOR_SIZE},
+    )
+    payload_indexes.create_payload_indexes(
+        client, collection_name, IngestionEntity.FRAMES
+    )
+    points = [
+        upsert.make_point(
+            point_id=index,
+            vector=_vector(index),
+            payload={
+                "video_id": video_id,
+                "shot_id": shot_id,
+                "original_frame_id": frame_id,
+                "pts_sec": pts_sec,
+                "shot_start_sec": start_sec,
+                "shot_end_sec": end_sec,
+            },
+        )
+        for index, (video_id, shot_id, frame_id, pts_sec, start_sec, end_sec) in enumerate(
+            [
+                ("L01_V001", 1, 100, 4.0, 0.0, 5.0),
+                ("L01_V001", 2, 200, 8.0, 5.0, 10.0),
+                ("L01_V002", 1, 300, 4.0, 0.0, 5.0),
+            ]
+        )
+    ]
+    upsert.upsert_points(client, collection_name, points)
+    return collection_name
+
+
 class TestSearch:
     def test_returns_hits_ordered_by_similarity(self, client, populated):
         hits = search.search(client, populated, _vector(0), limit=3)
@@ -119,6 +154,24 @@ class TestSearch:
 
     def test_no_constraints_means_no_filter(self):
         assert search.build_filter() is None
+
+    def test_asr_windows_scroll_only_overlapping_frames(
+        self, client, temporal_frames
+    ):
+        segments = [
+            search.AsrSegment(
+                score=1.0,
+                video_id="L01_V001",
+                start_sec=6.0,
+                end_sec=9.0,
+            )
+        ]
+
+        hits = search.scroll_frames_for_asr_segments(
+            client, temporal_frames, segments, page_size=1
+        )
+
+        assert [hit.original_frame_id for hit in hits] == [200]
 
 
 @pytest.fixture

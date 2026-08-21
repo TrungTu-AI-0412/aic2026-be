@@ -701,9 +701,9 @@ This is the only network hop on the query path, so:
   to tell which form it is;
 - successes are `lru_cache`d and failures are not, so the endpoint coming back
   mid-session is picked up on the next query;
-- `SearchResponse.rewritten_queries` reports the **English** forms, `None`
-  meaning the step did not run. The cleaned form is not reported: it is close
-  enough to the request to read off it.
+- `SearchResponse.rewritten_queries` reports the **English** forms and
+  `cleaned_queries` reports the speech forms. Both are `None` when the step did
+  not run.
 
 `docs/research/mervin.md` argues the step away in favour of a Vietnamese-native
 embedding model. That is an argument against SigLIP2, not against translating

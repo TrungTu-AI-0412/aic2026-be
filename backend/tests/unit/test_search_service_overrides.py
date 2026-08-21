@@ -63,6 +63,24 @@ async def test_the_bonus_can_be_switched_off_per_request(captured):
     assert captured["config"].asr_enabled is False
 
 
+async def test_explicit_retrieval_modes_resolve_the_asr_stage(captured):
+    svc = service()
+
+    await svc.search_kis(
+        KisSearchRequest(
+            task="kis", description="xin chào", retrieval_mode="visual"
+        )
+    )
+    assert captured["config"].asr_enabled is False
+
+    await svc.search_kis(
+        KisSearchRequest(
+            task="kis", description="xin chào", retrieval_mode="asr_only"
+        )
+    )
+    assert captured["config"].asr_enabled is True
+
+
 async def test_an_override_does_not_leak_into_the_next_request(captured):
     """The config is frozen and replaced per request, so tuning one query must
     not silently retune every query after it."""
@@ -93,3 +111,30 @@ async def test_weight_above_one_is_rejected_before_the_engine():
 
     with pytest.raises(ValidationError):
         KisSearchRequest(task="kis", description="a", asr_weight=1.5)
+
+
+def test_retrieval_mode_rejects_legacy_or_irrelevant_overrides():
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        KisSearchRequest(
+            task="kis",
+            description="a",
+            retrieval_mode="asr_only",
+            asr_enabled=True,
+        )
+    with pytest.raises(ValidationError):
+        KisSearchRequest(
+            task="kis",
+            description="a",
+            retrieval_mode="asr_only",
+            asr_weight=0.5,
+        )
+    with pytest.raises(ValidationError):
+        KisSearchRequest(
+            task="kis",
+            description="a",
+            retrieval_mode="asr_only",
+            asr_dense_weight=0,
+            asr_sparse_weight=0,
+        )

@@ -229,6 +229,64 @@ def search_asr(
     return dense_hits, sparse_hits
 
 
+def scroll_frames_for_asr_segments(
+    client: QdrantClient,
+    collection_name: str,
+    segments: Sequence[AsrSegment],
+    page_size: int = 256,
+) -> list[ScoredFrame]:
+    """Read sampled frames whose shots overlap any retrieved speech segment.
+
+    ASR-only retrieval has no image vector with which to query the frame
+    collection. The temporal payload is the join key: each `should` branch
+    keeps the video identity and the two sides of the interval together, then
+    scrolling returns every candidate frame in one paginated operation.
+    """
+    windows = list(
+        dict.fromkeys(
+            (segment.video_id, segment.start_sec, segment.end_sec)
+            for segment in segments
+            if segment.video_id
+        )
+    )
+    if not windows:
+        return []
+
+    query_filter = qmodels.Filter(
+        should=[
+            qmodels.Filter(
+                must=[
+                    qmodels.FieldCondition(
+                        key="video_id", match=qmodels.MatchValue(value=video_id)
+                    ),
+                    qmodels.FieldCondition(
+                        key="shot_start_sec", range=qmodels.Range(lte=end_sec)
+                    ),
+                    qmodels.FieldCondition(
+                        key="shot_end_sec", range=qmodels.Range(gte=start_sec)
+                    ),
+                ]
+            )
+            for video_id, start_sec, end_sec in windows
+        ]
+    )
+
+    frames: list[ScoredFrame] = []
+    offset = None
+    while True:
+        points, offset = client.scroll(
+            collection_name=collection_name,
+            scroll_filter=query_filter,
+            limit=page_size,
+            offset=offset,
+            with_payload=True,
+            with_vectors=False,
+        )
+        frames.extend(_to_scored_frame(point) for point in points)
+        if offset is None:
+            return frames
+
+
 def _to_asr_segment(point) -> AsrSegment:
     payload = point.payload or {}
     return AsrSegment(
@@ -244,7 +302,9 @@ def _to_asr_segment(point) -> AsrSegment:
 def _to_scored_frame(point) -> ScoredFrame:
     payload = point.payload or {}
     return ScoredFrame(
-        score=float(point.score),
+        # `query_points` carries similarity; payload-only `scroll` records do
+        # not. ASR-only ranking uses the segment score after this temporal join.
+        score=float(getattr(point, "score", 0.0)),
         video_id=str(payload.get("video_id", "")),
         shot_id=int(payload.get("shot_id", 0)),
         original_frame_id=_optional_int(payload.get("original_frame_id")),

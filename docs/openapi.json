@@ -83,6 +83,9 @@
               }
             }
           },
+          "503": {
+            "description": "ASR-only retrieval is unavailable"
+          },
           "422": {
             "description": "Validation Error",
             "content": {
@@ -123,6 +126,9 @@
                 }
               }
             }
+          },
+          "503": {
+            "description": "ASR-only retrieval is unavailable"
           },
           "422": {
             "description": "Validation Error",
@@ -607,6 +613,40 @@
   },
   "components": {
     "schemas": {
+      "AsrEvidence": {
+        "properties": {
+          "segment": {
+            "type": "integer",
+            "title": "Segment"
+          },
+          "text": {
+            "type": "string",
+            "title": "Text"
+          },
+          "start_sec": {
+            "type": "number",
+            "title": "Start Sec"
+          },
+          "end_sec": {
+            "type": "number",
+            "title": "End Sec"
+          },
+          "score": {
+            "type": "number",
+            "title": "Score"
+          }
+        },
+        "type": "object",
+        "required": [
+          "segment",
+          "text",
+          "start_sec",
+          "end_sec",
+          "score"
+        ],
+        "title": "AsrEvidence",
+        "description": "The speech segment that produced an ASR-only frame result."
+      },
       "CreateIngestionJobRequest": {
         "properties": {
           "entity": {
@@ -1173,6 +1213,23 @@
             "title": "Asr Sparse Weight",
             "description": "Weight of the lexical (BM25) half of the speech search."
           },
+          "retrieval_mode": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "visual",
+                  "visual_asr",
+                  "asr_only"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Retrieval Mode",
+            "description": "Explicit retrieval source. Omit to keep the configured default and legacy asr_enabled behaviour. ASR-only is supported by KIS/Q&A only."
+          },
           "task": {
             "type": "string",
             "const": "kis",
@@ -1322,6 +1379,23 @@
             "title": "Asr Sparse Weight",
             "description": "Weight of the lexical (BM25) half of the speech search."
           },
+          "retrieval_mode": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "visual",
+                  "visual_asr",
+                  "asr_only"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Retrieval Mode",
+            "description": "Explicit retrieval source. Omit to keep the configured default and legacy asr_enabled behaviour. ASR-only is supported by KIS/Q&A only."
+          },
           "task": {
             "type": "string",
             "const": "qa",
@@ -1363,6 +1437,16 @@
             ],
             "title": "Task"
           },
+          "effective_retrieval_mode": {
+            "type": "string",
+            "enum": [
+              "visual",
+              "visual_asr",
+              "asr_only"
+            ],
+            "title": "Effective Retrieval Mode",
+            "default": "visual"
+          },
           "rewritten_queries": {
             "anyOf": [
               {
@@ -1376,7 +1460,22 @@
               }
             ],
             "title": "Rewritten Queries",
-            "description": "The English forms the rewriting step encoded against the image space: [description] for KIS/QA, [overview, *events] for TRAKE. The speech stage searched a cleaned form of the original, which is not reported. Null when rewriting was off or failed, in which case the query was searched exactly as typed."
+            "description": "The English forms the rewriting step encoded against the image space: [description] for KIS/QA, [overview, *events] for TRAKE. See cleaned_queries for the speech form. Null when rewriting was off or failed, in which case the query was searched exactly as typed."
+          },
+          "cleaned_queries": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cleaned Queries",
+            "description": "The original-language forms with retrieval instructions removed, searched against speech transcripts. Null when rewriting was off or failed."
           },
           "results": {
             "items": {
@@ -1440,6 +1539,16 @@
               }
             ],
             "title": "Events"
+          },
+          "asr_evidence": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AsrEvidence"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "type": "object",
@@ -1478,6 +1587,28 @@
           "model_config_name": {
             "type": "string",
             "title": "Model Config Name"
+          },
+          "asr_collection": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Asr Collection"
+          },
+          "asr_model_config_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Asr Model Config Name"
           }
         },
         "type": "object",
@@ -1627,6 +1758,7 @@
             "description": "Widest gap in seconds between consecutive events. 0 disables the check; None uses the configured default."
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "task",
