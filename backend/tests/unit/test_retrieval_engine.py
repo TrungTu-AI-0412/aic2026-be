@@ -29,6 +29,8 @@ def frame(
     shot_id: int = 0,
     frame_id: int = 0,
     pts_sec: float | None = None,
+    shot_start_sec: float | None = None,
+    shot_end_sec: float | None = None,
 ) -> ScoredFrame:
     return ScoredFrame(
         score=score,
@@ -39,6 +41,8 @@ def frame(
         end_frame=None,
         path=None,
         pts_sec=pts_sec,
+        shot_start_sec=shot_start_sec,
+        shot_end_sec=shot_end_sec,
     )
 
 
@@ -193,3 +197,69 @@ def test_speech_searches_the_original_while_the_image_space_gets_the_rewrite(
 
     assert encoded == ["a man running", "a man running"]
     assert spoken == ["người đàn ông đang chạy", "người đàn ông đang chạy"]
+
+
+def test_asr_segments_map_to_the_nearest_midpoint_frame_and_dedupe_by_shot():
+    frames = [
+        frame(
+            0.1,
+            shot_id=7,
+            frame_id=100,
+            pts_sec=4.0,
+            shot_start_sec=0.0,
+            shot_end_sec=10.0,
+        ),
+        frame(
+            0.1,
+            shot_id=7,
+            frame_id=120,
+            pts_sec=6.0,
+            shot_start_sec=0.0,
+            shot_end_sec=10.0,
+        ),
+    ]
+    segments = [
+        AsrSegment(
+            score=0.4,
+            video_id="L01_V001",
+            segment=1,
+            start_sec=4.0,
+            end_sec=6.0,
+            text="lower score",
+        ),
+        AsrSegment(
+            score=0.9,
+            video_id="L01_V001",
+            segment=2,
+            start_sec=4.0,
+            end_sec=6.0,
+            text="winning transcript",
+        ),
+    ]
+
+    hits = engine.map_asr_segments_to_frames(segments, frames, top_k=10)
+
+    assert len(hits) == 1
+    # Both frames are one second from the midpoint, so the lower original id
+    # is the deterministic tie-break.
+    assert hits[0].frame.representative_frame == 100
+    assert hits[0].segment.text == "winning transcript"
+
+
+def test_asr_mapping_skips_frames_without_temporal_coordinates():
+    segment = AsrSegment(
+        score=1.0,
+        video_id="L01_V001",
+        start_sec=1.0,
+        end_sec=2.0,
+    )
+    invalid = frame(0.1, frame_id=0, pts_sec=None)
+
+    assert engine.map_asr_segments_to_frames([segment], [invalid], 5) == []
+
+
+def test_asr_only_requires_an_enabled_collection():
+    config = replace(CONFIG, asr_collection=None)
+
+    with pytest.raises(engine.AsrOnlyUnavailableError):
+        engine.search_asr_only("lời thoại", 5, config, Timings())

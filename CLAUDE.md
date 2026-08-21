@@ -126,8 +126,9 @@ network hop the query path takes, so it is on a timeout that has to cover a
 whole TRAKE batch (measured 1.8s for an overview plus five events) and **every**
 failure — box down, timeout, a line missing its `||` separator — returns `None`,
 and the query runs exactly as typed on both sides.
-`SearchResponse.rewritten_queries` reports the English forms only, `None`
-meaning the step did not run. `docs/research/mervin.md` argues the whole step
+`SearchResponse.rewritten_queries` reports the English forms and
+`cleaned_queries` reports the speech forms; both are `None` when the step did
+not run. `docs/research/mervin.md` argues the whole step
 away in favour of a Vietnamese-native embedding model — the argument is against
 SigLIP2, not against translating for it.
 

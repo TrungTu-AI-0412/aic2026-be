@@ -19,7 +19,22 @@ from app.vector_store.search import (
     build_filter,
     search,
     search_asr,
+    scroll_frames_for_asr_segments,
 )
+
+
+class AsrOnlyRequestError(ValueError):
+    """The resolved request cannot run an ASR-only search."""
+
+
+class AsrOnlyUnavailableError(RuntimeError):
+    """The collections needed by an explicit ASR-only search are unavailable."""
+
+
+@dataclass(frozen=True)
+class AsrOnlyHit:
+    frame: ScoredFrame
+    segment: AsrSegment
 
 
 @dataclass
@@ -161,7 +176,7 @@ def search_speech(
     Returns an empty list when the stage is off or unconfigured, so the caller
     can treat "no speech collection" and "no matching speech" identically.
     """
-    if not config.asr_enabled or not config.asr_collection or config.asr_weight <= 0:
+    if not config.asr_enabled or not config.asr_collection:
         return []
 
     started = time.perf_counter()
@@ -195,6 +210,121 @@ def search_speech(
         )
     finally:
         timings.record("asr", started)
+
+
+def map_asr_segments_to_frames(
+    segments: list[AsrSegment], frames: list[ScoredFrame], top_k: int
+) -> list[AsrOnlyHit]:
+    """Choose the sampled keyframe nearest each segment midpoint.
+
+    The vector-store filter already restricts frames to overlapping shots, but
+    the overlap is repeated here so the pure mapping remains correct in tests
+    and if a broader batch filter is introduced later.
+    """
+    by_video: dict[str, list[ScoredFrame]] = {}
+    for frame in frames:
+        if frame.pts_sec is None or frame.original_frame_id is None:
+            continue
+        by_video.setdefault(frame.video_id, []).append(frame)
+
+    best_by_shot: dict[tuple[str, int], AsrOnlyHit] = {}
+    for segment in segments:
+        midpoint = (segment.start_sec + segment.end_sec) / 2.0
+        candidates = []
+        for frame in by_video.get(segment.video_id, []):
+            window = frame.time_window()
+            if window is None:
+                continue
+            low, high = window
+            if low <= segment.end_sec and high >= segment.start_sec:
+                candidates.append(frame)
+        if not candidates:
+            continue
+
+        chosen = min(
+            candidates,
+            key=lambda frame: (
+                abs((frame.pts_sec or 0.0) - midpoint),
+                frame.representative_frame,
+            ),
+        )
+        hit = AsrOnlyHit(frame=chosen, segment=segment)
+        key = (chosen.video_id, chosen.shot_id)
+        current = best_by_shot.get(key)
+        if current is None or (
+            segment.score,
+            -segment.segment,
+            -chosen.representative_frame,
+        ) > (
+            current.segment.score,
+            -current.segment.segment,
+            -current.frame.representative_frame,
+        ):
+            best_by_shot[key] = hit
+
+    ranked = sorted(
+        best_by_shot.values(),
+        key=lambda hit: (
+            -hit.segment.score,
+            hit.frame.video_id,
+            hit.segment.segment,
+            hit.frame.representative_frame,
+        ),
+    )
+    return ranked[:top_k]
+
+
+def search_asr_only(
+    text: str,
+    top_k: int,
+    config: RetrievalConfig,
+    timings: Timings,
+) -> list[AsrOnlyHit]:
+    """Search speech globally and map its time ranges to submit-ready frames."""
+    if not config.asr_collection or not config.asr_enabled:
+        raise AsrOnlyUnavailableError("ASR-only retrieval is not configured")
+    if config.asr_dense_weight <= 0 and config.asr_sparse_weight <= 0:
+        raise AsrOnlyRequestError(
+            "ASR-only retrieval needs a dense or lexical branch"
+        )
+
+    client = get_qdrant_client()
+    try:
+        if not client.collection_exists(config.asr_collection):
+            raise AsrOnlyUnavailableError(
+                f"ASR collection '{config.asr_collection}' is unavailable"
+            )
+        if not client.collection_exists(config.frames_collection):
+            raise AsrOnlyUnavailableError(
+                f"frame collection '{config.frames_collection}' is unavailable"
+            )
+        segments = search_speech(text, top_k, config, timings)
+    except (AsrOnlyRequestError, AsrOnlyUnavailableError):
+        raise
+    except Exception as exc:
+        raise AsrOnlyUnavailableError(f"ASR search unavailable: {exc}") from exc
+
+    if not segments:
+        return []
+
+    started = time.perf_counter()
+    try:
+        frames = scroll_frames_for_asr_segments(
+            client, config.frames_collection, segments
+        )
+        hits = map_asr_segments_to_frames(segments, frames, top_k)
+    except Exception as exc:
+        raise AsrOnlyUnavailableError(
+            f"ASR frame mapping unavailable: {exc}"
+        ) from exc
+    finally:
+        timings.record("asr_frame_map", started)
+
+    if not hits:
+        raise AsrOnlyUnavailableError(
+            "ASR hits could not be mapped to temporal frame payloads"
+        )
+    return hits
 
 
 def rank(
@@ -260,7 +390,11 @@ def retrieve_per_video(
     # flattened hits. `apply_asr_bonus` min-max normalises the segments it is
     # given, so boosting each video from its own segment list would make the
     # bonuses incomparable between videos - exactly what ranking them needs.
-    segments = search_speech(speech_text or text, limit, config, timings, video_ids)
+    segments = (
+        search_speech(speech_text or text, limit, config, timings, video_ids)
+        if config.asr_weight > 0
+        else []
+    )
     if segments:
         started = time.perf_counter()
         try:
@@ -310,7 +444,11 @@ def retrieve(
     # Before dedupe on purpose. The bonus is applied per frame, and dedupe keeps
     # the best frame per shot, so boosting first lets speech decide *which*
     # frame represents a shot as well as where that shot ranks.
-    segments = search_speech(speech_text or text, top_k, config, timings, video_ids)
+    segments = (
+        search_speech(speech_text or text, top_k, config, timings, video_ids)
+        if config.asr_weight > 0
+        else []
+    )
     if segments:
         started = time.perf_counter()
         try:

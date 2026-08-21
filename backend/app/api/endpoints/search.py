@@ -1,6 +1,7 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 
 from app.api.deps import get_search_service
+from app.retrieval.engine import AsrOnlyRequestError, AsrOnlyUnavailableError
 from app.schemas.search import (
     KisSearchRequest,
     QaSearchRequest,
@@ -12,20 +13,38 @@ from app.services.search import SearchService
 router = APIRouter()
 
 
-@router.post("/search/kis", response_model=SearchResponse)
+@router.post(
+    "/search/kis",
+    response_model=SearchResponse,
+    responses={503: {"description": "ASR-only retrieval is unavailable"}},
+)
 async def search_kis(
     request: KisSearchRequest,
     search_service: SearchService = Depends(get_search_service),
 ) -> SearchResponse:
-    return await search_service.search_kis(request)
+    try:
+        return await search_service.search_kis(request)
+    except AsrOnlyRequestError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except AsrOnlyUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
-@router.post("/search/qa", response_model=SearchResponse)
+@router.post(
+    "/search/qa",
+    response_model=SearchResponse,
+    responses={503: {"description": "ASR-only retrieval is unavailable"}},
+)
 async def search_qa(
     request: QaSearchRequest,
     search_service: SearchService = Depends(get_search_service),
 ) -> SearchResponse:
-    return await search_service.search_qa(request)
+    try:
+        return await search_service.search_qa(request)
+    except AsrOnlyRequestError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except AsrOnlyUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @router.post("/search/trake", response_model=SearchResponse)
