@@ -14,6 +14,7 @@ from app.retrieval.engine import (
     retrieve,
     retrieve_per_video,
 )
+from app.retrieval.rewrite import rewrite_queries
 from app.schemas.search import (
     EventCandidate,
     EventHit,
@@ -63,7 +64,14 @@ def _frame_search(
 ) -> SearchResponse:
     """One hit per shot, one frame per hit."""
     timings = Timings()
-    hits = retrieve(text, top_k, config, timings)
+    rewritten = rewrite_queries([text], config, timings)
+    hits = retrieve(
+        rewritten[0] if rewritten else text,
+        top_k,
+        config,
+        timings,
+        speech_text=text,
+    )
 
     results = [
         SearchResult(
@@ -74,7 +82,7 @@ def _frame_search(
         )
         for rank, hit in enumerate(hits, start=1)
     ]
-    return _response(task, results, config, timings)
+    return _response(task, results, config, timings, rewritten)
 
 
 def search_trake(request: TrakeSearchRequest, config: RetrievalConfig) -> SearchResponse:
@@ -88,14 +96,19 @@ def search_trake(request: TrakeSearchRequest, config: RetrievalConfig) -> Search
     global top-N, which a fine-grained event routinely does.
     """
     timings = Timings()
-    events = request.events
+    # Overview and every event in one rewrite call. Each is searched twice - once
+    # globally to choose videos, once inside each candidate - and a request-wide
+    # batch keeps that at a single round trip either way.
+    originals = [request.overview, *request.events]
+    rewritten = rewrite_queries(originals, config, timings)
+    queries = rewritten or originals
 
     if request.video_ids:
         videos = list(dict.fromkeys(request.video_ids))
     else:
-        videos = _candidate_videos(request, config, timings)
+        videos = _candidate_videos(queries, originals, config, timings)
     if not videos:
-        return _response("trake", [], config, timings)
+        return _response("trake", [], config, timings, rewritten)
 
     # Reranking is off for the second stage. The cross-encoder head covers the
     # top `rerank_top_n` of one global list, so against per-video candidate
@@ -106,9 +119,14 @@ def search_trake(request: TrakeSearchRequest, config: RetrievalConfig) -> Search
     localise = replace(config, rerank_enabled=False)
     per_event = [
         retrieve_per_video(
-            event, videos, TRAKE_CANDIDATES_PER_EVENT, localise, timings
+            query,
+            videos,
+            TRAKE_CANDIDATES_PER_EVENT,
+            localise,
+            timings,
+            speech_text=original,
         )
-        for event in events
+        for query, original in zip(queries[1:], originals[1:])
     ]
 
     max_gap = (
@@ -143,11 +161,14 @@ def search_trake(request: TrakeSearchRequest, config: RetrievalConfig) -> Search
             sequences[: request.top_k], start=1
         )
     ]
-    return _response("trake", results, config, timings)
+    return _response("trake", results, config, timings, rewritten)
 
 
 def _candidate_videos(
-    request: TrakeSearchRequest, config: RetrievalConfig, timings: Timings
+    queries: list[str],
+    originals: list[str],
+    config: RetrievalConfig,
+    timings: Timings,
 ) -> list[str]:
     """Videos worth a per-event search, best first.
 
@@ -157,13 +178,30 @@ def _candidate_videos(
     hit for every event is what dropped correct videos, and the events get
     another chance inside each candidate. A video the overview alone found
     still earns a full alignment pass.
+
+    `queries` and `originals` are the overview followed by the events, rewritten
+    and as typed; the second is what the speech stage searches with.
     """
     overview = _best_per_video(
-        retrieve(request.overview, TRAKE_STAGE_A_TOP_K, config, timings)
+        retrieve(
+            queries[0],
+            TRAKE_STAGE_A_TOP_K,
+            config,
+            timings,
+            speech_text=originals[0],
+        )
     )
     per_event = [
-        _best_per_video(retrieve(event, TRAKE_STAGE_A_TOP_K, config, timings))
-        for event in request.events
+        _best_per_video(
+            retrieve(
+                query,
+                TRAKE_STAGE_A_TOP_K,
+                config,
+                timings,
+                speech_text=original,
+            )
+        )
+        for query, original in zip(queries[1:], originals[1:])
     ]
 
     scored: dict[str, float] = {}
@@ -323,11 +361,13 @@ def _response(
     results: list[SearchResult],
     config: RetrievalConfig,
     timings: Timings,
+    rewritten: list[str] | None = None,
 ) -> SearchResponse:
     return SearchResponse(
         request_id=str(uuid4()),
         task=task,
         results=results,
+        rewritten_queries=rewritten,
         versions=SearchVersions(
             frames_collection=config.frames_collection,
             clips_collection=config.clips_collection,

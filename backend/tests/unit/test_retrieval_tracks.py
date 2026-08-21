@@ -53,25 +53,36 @@ class FakeEngine:
     responses: dict[str, list[ScoredFrame]]
     per_video_calls: list[tuple[str, list[str]]]
     per_video_responses: dict[str, list[ScoredFrame]]
+    # What the speech stage was handed, which is the query as typed even when
+    # the encoded text was rewritten.
+    speech_calls: list[str]
 
 
 @pytest.fixture
 def fake_retrieve(monkeypatch):
     """Replace the shared engine so tracks are tested without a model."""
     engine = FakeEngine(
-        calls=[], responses={}, per_video_calls=[], per_video_responses={}
+        calls=[],
+        responses={},
+        per_video_calls=[],
+        per_video_responses={},
+        speech_calls=[],
     )
 
-    def _retrieve(text, top_k, config, timings, video_ids=None):
+    def _retrieve(text, top_k, config, timings, video_ids=None, speech_text=None):
         engine.calls.append(text)
+        engine.speech_calls.append(speech_text or text)
         timings.record("encode", time.perf_counter())
         hits = engine.responses.get(text, [])
         if video_ids is not None:
             hits = [hit for hit in hits if hit.video_id in video_ids]
         return hits[:top_k]
 
-    def _retrieve_per_video(text, video_ids, limit, config, timings):
+    def _retrieve_per_video(
+        text, video_ids, limit, config, timings, speech_text=None
+    ):
         engine.per_video_calls.append((text, list(video_ids)))
+        engine.speech_calls.append(speech_text or text)
         timings.record("encode", time.perf_counter())
         table = engine.per_video_responses or engine.responses
         grouped: dict[str, list[ScoredFrame]] = {
@@ -429,3 +440,91 @@ class TestTrake:
         )
 
         assert response.results[0].events is None
+
+
+class TestRewriting:
+    """What gets searched with the rewrite, and what keeps the original.
+
+    The rewrite is English for the sake of the image space and the reranker; the
+    speech collection holds Vietnamese transcripts, so it is searched with the
+    query as typed. Every test above runs with rewriting a no-op, because
+    `CONFIG` sets no endpoint - which is also what protects them from the
+    network.
+    """
+
+    @pytest.fixture
+    def rewriter(self, monkeypatch):
+        """Stand in for the LLM: prefix each query, preserving order."""
+        batches: list[list[str]] = []
+
+        def _rewrite_queries(texts, config, timings):
+            batches.append(list(texts))
+            return [f"EN {text}" for text in texts]
+
+        monkeypatch.setattr(tracks, "rewrite_queries", _rewrite_queries)
+        return batches
+
+    def test_kis_encodes_the_rewrite_and_hears_the_original(
+        self, fake_retrieve, rewriter
+    ):
+        fake_retrieve.responses["EN xe hơi đỏ"] = [frame(0.9, frame_id=10)]
+
+        response = tracks.search_kis(
+            KisSearchRequest(task="kis", description="xe hơi đỏ", top_k=10), CONFIG
+        )
+
+        assert fake_retrieve.calls == ["EN xe hơi đỏ"]
+        assert fake_retrieve.speech_calls == ["xe hơi đỏ"]
+        assert response.rewritten_queries == ["EN xe hơi đỏ"]
+        assert response.results[0].frame_ids == [10]
+
+    def test_trake_rewrites_the_whole_request_in_one_call(
+        self, fake_retrieve, rewriter
+    ):
+        """One batch, and the events stay in the order they were given.
+
+        Each event is searched twice - globally, then inside each candidate -
+        and the second stage must reuse the first stage's rewrite rather than
+        ask again.
+        """
+        fake_retrieve.responses["EN chạy"] = [frame(0.9, frame_id=10)]
+        fake_retrieve.responses["EN nhảy"] = [frame(0.8, frame_id=50)]
+
+        response = tracks.search_trake(
+            TrakeSearchRequest(
+                task="trake", overview="cú nhảy", events=["chạy", "nhảy"], top_k=10
+            ),
+            CONFIG,
+        )
+
+        assert rewriter == [["cú nhảy", "chạy", "nhảy"]]
+        assert fake_retrieve.calls == ["EN cú nhảy", "EN chạy", "EN nhảy"]
+        assert fake_retrieve.per_video_calls == [
+            ("EN chạy", ["L01_V001"]),
+            ("EN nhảy", ["L01_V001"]),
+        ]
+        # Both stages hear the query as typed, event order preserved.
+        assert fake_retrieve.speech_calls == [
+            "cú nhảy",
+            "chạy",
+            "nhảy",
+            "chạy",
+            "nhảy",
+        ]
+        assert response.rewritten_queries == ["EN cú nhảy", "EN chạy", "EN nhảy"]
+        assert response.results[0].frame_ids == [10, 50]
+
+    def test_a_failed_rewrite_leaves_the_query_alone(self, fake_retrieve, monkeypatch):
+        """None means "nothing was rewritten", and the query still runs."""
+        monkeypatch.setattr(
+            tracks, "rewrite_queries", lambda texts, config, timings: None
+        )
+        fake_retrieve.responses["xe hơi đỏ"] = [frame(0.9, frame_id=10)]
+
+        response = tracks.search_kis(
+            KisSearchRequest(task="kis", description="xe hơi đỏ", top_k=10), CONFIG
+        )
+
+        assert fake_retrieve.calls == ["xe hơi đỏ"]
+        assert response.rewritten_queries is None
+        assert response.results[0].frame_ids == [10]

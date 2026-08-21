@@ -1363,6 +1363,21 @@
             ],
             "title": "Task"
           },
+          "rewritten_queries": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rewritten Queries",
+            "description": "The queries actually encoded, after rewriting: [description] for KIS/QA, [overview, *events] for TRAKE. Null when rewriting was off or failed, in which case the query was searched as typed."
+          },
           "results": {
             "items": {
               "$ref": "#/components/schemas/SearchResult"

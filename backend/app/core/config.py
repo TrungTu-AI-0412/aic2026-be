@@ -73,6 +73,22 @@ class Settings(BaseSettings):
     RERANK_TOP_N: int = 30
     RERANK_MODEL: str = "Salesforce/blip-itm-large-coco"
 
+    # Query rewriting. An LLM translates the query to English and strips the
+    # operator's phrasing ("hãy tìm trong video...") before it is encoded,
+    # because the image space and the reranker are both English-centric. The
+    # speech stage keeps the original: the transcripts are Vietnamese.
+    # This is the one network hop the query path takes, so it is on a short
+    # timeout and any failure falls back to the query as typed.
+    QUERY_REWRITE_ENABLED: bool = True
+    QUERY_REWRITE_TIMEOUT_SEC: float = 3.0
+    # OpenAI-compatible chat completions endpoint, including the /v1. Unset
+    # leaves rewriting a silent no-op even with QUERY_REWRITE_ENABLED=true.
+    VLM_BASE_URL: Optional[str] = None
+    VLM_MODEL: str = "Qwen/Qwen3.6-27B"
+    # Plain str, not Optional: env_ignore_empty drops the blank value in .env, so
+    # this default is what a keyless local server actually gets.
+    VLM_API_KEY: str = ""
+
     # Per-video frame bounds used to reject a submission row that could never
     # score. Defaults to video_bounds.parquet under INGESTION_DATA_ROOT; when
     # the file is missing the export still works, just without the check.
