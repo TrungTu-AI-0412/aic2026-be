@@ -661,6 +661,41 @@ task-specific shaping
 
 Current shared stages are:
 
+### 0. Query rewriting
+
+```text
+rewrite.rewrite_queries
+  -> VLM_BASE_URL /chat/completions
+  -> English, artifact-free query
+```
+
+Runs in `tracks.py`, ahead of the engine, and rewrites every query of the
+request in one call — a TRAKE overview plus N events is one round trip, not
+N+1. The LLM translates to English and drops the operator's phrasing ("hãy tìm
+trong video…", question forms, quotes, numbering), because SigLIP2 and the BLIP
+reranker are both English-centric and would otherwise score that wrapper as
+part of the scene.
+
+This is the only network hop on the query path, so:
+
+- the timeout is short (`QUERY_REWRITE_TIMEOUT_SEC`);
+- **every** failure — unreachable box, timeout, misnumbered output — returns
+  `None` and the query is searched exactly as typed;
+- a partial parse is treated as a failure, since a shifted line would move a
+  TRAKE event onto the wrong query;
+- successes are `lru_cache`d and failures are not, so the endpoint coming back
+  mid-session is picked up on the next query;
+- `SearchResponse.rewritten_queries` reports what was actually encoded, `None`
+  meaning the step did not run.
+
+The speech stage keeps the original text (`retrieve(..., speech_text=)`): the
+transcripts are Vietnamese and are searched by term overlap as well as densely,
+so handing it the translation would drop the lexical half to nothing.
+
+`docs/research/mervin.md` argues the step away in favour of a Vietnamese-native
+embedding model. That is an argument against SigLIP2, not against translating
+for the SigLIP2 that ships.
+
 ### 1. Query encoding
 
 ```text
@@ -1205,7 +1240,8 @@ sync when either file contains rules intended for all coding agents.
 - TRAKE event localisation is only as fine as the keyframes: three per shot, so
   a sub-second moment is bracketed rather than pinned. `events[].alternates`
   exists so an operator closes that gap by hand. The VLM endpoint in `.env` is
-  read by no code and is the obvious next lever.
+  now read, but only to rewrite queries; asking it *where* an event is inside a
+  bracketed shot is the obvious next lever.
 - No TRAKE eval set exists (`data/eval_set.jsonl` is absent), so retrieval
   changes to it are checked by unit tests and by eye, not measured.
 - `docs/architecture.md` is empty.

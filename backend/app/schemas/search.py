@@ -131,6 +131,19 @@ class SearchVersions(BaseModel):
 class SearchResponse(BaseModel):
     request_id: str
     task: Literal["kis", "qa", "trake"]
+    # What was actually encoded, once the rewriting step translated the query to
+    # English and dropped the operator's phrasing. `[description]` for KIS and
+    # QA; `[overview, *events]` in request order for TRAKE. None when the step is
+    # off or fell back, so an operator can tell a query the model left alone from
+    # one it never saw.
+    rewritten_queries: list[str] | None = Field(
+        default=None,
+        description=(
+            "The queries actually encoded, after rewriting: [description] for"
+            " KIS/QA, [overview, *events] for TRAKE. Null when rewriting was off"
+            " or failed, in which case the query was searched as typed."
+        ),
+    )
     results: list[SearchResult]
     versions: SearchVersions
     latency_ms: dict[str, float]

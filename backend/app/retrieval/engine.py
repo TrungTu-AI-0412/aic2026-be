@@ -67,6 +67,15 @@ class RetrievalConfig:
     asr_sparse_weight: float = asr.DEFAULT_SPARSE_WEIGHT
     asr_pad_sec: float = asr.DEFAULT_PAD_SEC
 
+    # Query rewriting: an LLM translates the query to English and strips the
+    # operator's phrasing before it is encoded. No base URL leaves the step a
+    # no-op, so a config that never heard of it - every test below - is unchanged.
+    rewrite_enabled: bool = True
+    rewrite_base_url: str | None = None
+    rewrite_model: str = ""
+    rewrite_api_key: str = ""
+    rewrite_timeout_sec: float = 3.0
+
 
 def encode_query(text: str, config: RetrievalConfig, timings: Timings) -> list[float]:
     started = time.perf_counter()
@@ -214,6 +223,7 @@ def retrieve_per_video(
     limit: int,
     config: RetrievalConfig,
     timings: Timings,
+    speech_text: str | None = None,
 ) -> dict[str, list[ScoredFrame]]:
     """Top `limit` hits for `text` inside each of `video_ids`, keyed by video.
 
@@ -226,6 +236,9 @@ def retrieve_per_video(
     shot, and two events of a TRAKE query can happen inside one two-second
     shot, so collapsing would make that sequence unrepresentable rather than
     merely rank it worse.
+
+    `speech_text` overrides the text the speech stage searches with; see
+    `retrieve`.
     """
     if not video_ids:
         return {}
@@ -244,7 +257,7 @@ def retrieve_per_video(
     # flattened hits. `apply_asr_bonus` min-max normalises the segments it is
     # given, so boosting each video from its own segment list would make the
     # bonuses incomparable between videos - exactly what ranking them needs.
-    segments = search_speech(text, limit, config, timings, video_ids)
+    segments = search_speech(speech_text or text, limit, config, timings, video_ids)
     if segments:
         started = time.perf_counter()
         try:
@@ -273,16 +286,26 @@ def retrieve(
     config: RetrievalConfig,
     timings: Timings,
     video_ids: list[str] | None = None,
+    speech_text: str | None = None,
 ) -> list[ScoredFrame]:
-    """Encode one text query and return deduplicated, reranked hits."""
+    """Encode one text query and return deduplicated, reranked hits.
+
+    `speech_text` is the form of the query the speech stage should see, when it
+    differs from the one the image space should: rewriting turns a Vietnamese
+    query into English for SigLIP2 and the reranker, but the transcripts are
+    Vietnamese, so speech keeps the original. Defaults to `text`.
+    """
     vector = encode_query(text, config, timings)
+    # Frame-side lexical search follows `text`, not `speech_text`. Inert today -
+    # `frame_sparse_names` is empty - but when OCR is populated this should
+    # switch, since on-screen text is Vietnamese too.
     sparse_query = encode_query_sparse(text, config)
     hits = search_vector(vector, top_k, config, timings, video_ids, sparse_query)
 
     # Before dedupe on purpose. The bonus is applied per frame, and dedupe keeps
     # the best frame per shot, so boosting first lets speech decide *which*
     # frame represents a shot as well as where that shot ranks.
-    segments = search_speech(text, top_k, config, timings, video_ids)
+    segments = search_speech(speech_text or text, top_k, config, timings, video_ids)
     if segments:
         started = time.perf_counter()
         try:

@@ -104,7 +104,23 @@ implementations and where the active collection names are injected.
 
 `QdrantSearchService` wraps the whole synchronous path in `run_in_threadpool` —
 a transformer forward pass plus blocking Qdrant IO would otherwise stall the
-event loop. `engine.retrieve()` is the one shared path for every track:
+event loop.
+
+Ahead of the engine, `rewrite.rewrite_queries` sends every query of the request
+to the `VLM_BASE_URL` endpoint in one call: the LLM translates to English and
+strips the operator's phrasing, because SigLIP2 and the BLIP reranker are both
+English-centric and would otherwise score "hãy tìm trong video" as part of the
+scene. It is the only network hop the query path takes, so it is on a short
+timeout and **every** failure — box down, timeout, misnumbered output — returns
+`None` and the query runs as typed. `SearchResponse.rewritten_queries` reports
+what was encoded, `None` meaning the step did not run. The speech stage keeps
+the original text (`retrieve(..., speech_text=)`): the transcripts are
+Vietnamese and are searched by term overlap as well as densely, so English
+would drop the lexical half to nothing. `docs/research/mervin.md` argues the
+whole step away in favour of a Vietnamese-native embedding model — the argument
+is against SigLIP2, not against translating for it.
+
+`engine.retrieve()` is the one shared path for every track:
 
 1. `encode_query` → `features.multimodal.embed_text` with the configured profile
 2. `search_vector` → frame collection, plus the clip collection when configured,
@@ -238,8 +254,9 @@ types.
   naming convention.
 - TRAKE event localisation is only as fine as the keyframes: three per shot, so
   a sub-second moment is bracketed, not pinned. `events[].alternates` exists so
-  an operator closes that last gap by hand. The VLM endpoint in `.env` is unread
-  by any code and is the obvious next lever.
+  an operator closes that last gap by hand. The VLM endpoint in `.env` is now
+  read, but only to rewrite queries; asking it *where* an event is inside a
+  bracketed shot is the obvious next lever.
 - No TRAKE eval set exists (`data/eval_set.jsonl` is absent), so retrieval
   changes to it are checked by unit tests and by eye, not measured.
 - `docs/architecture.md` is empty.

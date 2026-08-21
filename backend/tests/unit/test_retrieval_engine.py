@@ -7,6 +7,8 @@ video that ranks low overall. And no shot collapse, because two events can
 happen inside one shot.
 """
 
+from dataclasses import replace
+
 import pytest
 
 from app.retrieval import engine
@@ -145,3 +147,49 @@ def test_no_videos_means_no_queries(fake_search):
     assert engine.retrieve_per_video("run", [], 5, CONFIG, Timings()) == {}
     assert calls == []
     assert encodes == []
+
+
+def test_speech_searches_the_original_while_the_image_space_gets_the_rewrite(
+    monkeypatch,
+):
+    """Rewriting is for the image space only.
+
+    The rewrite is English, because SigLIP2 and the reranker are; the speech
+    collection holds Vietnamese transcripts and is searched dense *and* by term
+    overlap, so handing it the translation would drop the lexical half to
+    nothing. Both entry points have to route the two strings the same way.
+    """
+    encoded: list[str] = []
+    spoken: list[str] = []
+
+    def _encode_query(text, config, timings):
+        encoded.append(text)
+        return [0.0]
+
+    def _search_speech(text, top_k, config, timings, video_ids=None):
+        spoken.append(text)
+        return []
+
+    monkeypatch.setattr(engine, "encode_query", _encode_query)
+    monkeypatch.setattr(engine, "encode_query_sparse", lambda text, config: None)
+    monkeypatch.setattr(
+        engine, "search_vector", lambda *args, **kwargs: [frame(0.5)]
+    )
+    monkeypatch.setattr(engine, "search_speech", _search_speech)
+
+    # `retrieve` reranks by default, which would load a cross-encoder.
+    config = replace(CONFIG, rerank_enabled=False)
+    engine.retrieve(
+        "a man running", 5, config, Timings(), speech_text="người đàn ông đang chạy"
+    )
+    engine.retrieve_per_video(
+        "a man running",
+        ["A"],
+        5,
+        config,
+        Timings(),
+        speech_text="người đàn ông đang chạy",
+    )
+
+    assert encoded == ["a man running", "a man running"]
+    assert spoken == ["người đàn ông đang chạy", "người đàn ông đang chạy"]

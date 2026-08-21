@@ -46,6 +46,11 @@ async def build_container(settings: Settings) -> Container:
                 asr_dense_weight=settings.ASR_DENSE_WEIGHT,
                 asr_sparse_weight=settings.ASR_SPARSE_WEIGHT,
                 asr_pad_sec=settings.ASR_PAD_SEC,
+                rewrite_enabled=settings.QUERY_REWRITE_ENABLED,
+                rewrite_base_url=settings.VLM_BASE_URL,
+                rewrite_model=settings.VLM_MODEL,
+                rewrite_api_key=settings.VLM_API_KEY,
+                rewrite_timeout_sec=settings.QUERY_REWRITE_TIMEOUT_SEC,
             )
         ),
         ingestion_service=SqliteIngestionService(
