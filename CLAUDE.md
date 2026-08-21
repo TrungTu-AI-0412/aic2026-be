@@ -106,26 +106,41 @@ implementations and where the active collection names are injected.
 a transformer forward pass plus blocking Qdrant IO would otherwise stall the
 event loop.
 
-Ahead of the engine, `rewrite.rewrite_queries` sends every query of the request
-to the `VLM_BASE_URL` endpoint in one call and gets back **two** forms of each,
-because the two collections want opposite things from the same string:
+Ahead of the engine, `rewrite.rewrite_queries` prepares every query of the
+request twice, because the two collections want opposite things from the same
+string. Two **separate prompts on two concurrent calls** to `VLM_BASE_URL`, not
+one call asking for both: merged, the caption rules bled into the deletion rules
+and the model variously deleted the subject of the query (`lễ hội đèn lồng`,
+`4 phi hành gia mặc áo đen`) or deleted nothing at all. Split, each call does
+its own job, and the wall clock is the slower of the two rather than their sum.
 
-- `Rewrite.vision` — translated to English, for the SigLIP2 text tower and the
-  BLIP reranker, which would otherwise score "hãy tìm trong video" as part of
-  the scene;
-- `Rewrite.speech` — the query in its original language with only the
-  operator's phrasing removed, for the transcripts. Not translated, because
-  they are Vietnamese and are matched by term overlap as well as densely, so
-  English would drop the lexical half to nothing; but not left as typed either,
-  because `hãy`, `tìm`, `trong`, `video`, `đoạn`, `có` are live BM25 terms
-  scoring against those transcripts.
+- `Rewrite.vision` — an English **caption**, at most 40 words, for the SigLIP2
+  text tower and the BLIP reranker. Not a translation: they would score "hãy tìm
+  trong video" as part of the scene, and the text tower reads exactly **64
+  tokens** (~45 English words), so a literal translation of a 700-character KIS
+  description is silently cut in half — losing the tail, which is where the
+  distinguishing detail usually sits. 40 words is the budget matched to that
+  window; capping it lower threw away detail that discriminates, including the
+  camera angle, which *is* visible. The prompt keeps a stated shot type
+  (overhead, head-on, close-up) and is told never to invent one.
+- `Rewrite.speech` — the query in its original language with the narration
+  phrases **deleted**, for the transcripts. Not translated, because they are
+  Vietnamese and are matched by term overlap as well as densely, so English
+  would drop the lexical half to nothing; not left as typed either, because
+  `đoạn video mô tả`, `phân cảnh bắt đầu là`, `hãy tìm` are live BM25 terms
+  scoring against those transcripts. Deletion, never rewording: whatever
+  survives is word-for-word what the operator typed.
 
 `retrieve(text, ..., speech_text=)` is where the two part company. Both forms
 come out of one call, so this costs one round trip, not two. It is the only
 network hop the query path takes, so it is on a timeout that has to cover a
 whole TRAKE batch (measured 1.8s for an overview plus five events) and **every**
-failure — box down, timeout, a line missing its `||` separator — returns `None`,
-and the query runs exactly as typed on both sides.
+failure — box down, timeout, a misnumbered line, a `finish_reason` other than
+`stop` — falls back to the query as typed. The two halves fail **independently**:
+a caption that does not arrive does not cost the cleaned form, which is the point
+of separate calls. `None` means both failed. The `finish_reason` check is
+load-bearing: a truncated reply still parses, because the early lines are
+intact, so without it the last query is searched as half a sentence.
 `SearchResponse.rewritten_queries` reports the English forms and
 `cleaned_queries` reports the speech forms; both are `None` when the step did
 not run. `docs/research/mervin.md` argues the whole step

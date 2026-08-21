@@ -1,28 +1,40 @@
-"""Query rewriting: one LLM call, two forms of every query.
+"""Query rewriting: two concurrent LLM calls, two forms of every query.
 
-Queries arrive in Vietnamese wrapped in operator instructions - "hãy tìm trong
-video đoạn có...", question forms, quotes, numbering. Retrieval then searches
-two collections that want opposite things from that string:
+Queries arrive in Vietnamese wrapped in narration about the video or the search
+itself - "đoạn video mô tả...", "tìm phân cảnh với...", question forms, quotes.
+Retrieval then searches two collections that want opposite things from that
+string, so each query is prepared twice:
 
-- keyframe images, through the SigLIP2 text tower and the BLIP ITM reranker,
-  which are English-centric and score the wrapper as if it described the scene;
+- keyframe images, through the SigLIP2 text tower and the BLIP ITM reranker.
+  Both are English-centric and score the narration as if it described the scene,
+  and the text tower reads exactly **64 tokens** (`padding="max_length"` in
+  `features.multimodal.embed_text`) - about 45 English words. A literal
+  translation of a 700-character KIS description runs well past that and is cut
+  without warning, losing the tail where the distinguishing detail sits. So this
+  side gets a short English *caption*.
 - speech transcripts, which are Vietnamese and are matched dense *and* by term
   overlap, so translating for them would drop the lexical half to nothing -
-  while leaving the wrapper in place makes `hãy`, `tìm`, `trong`, `video`,
-  `đoạn`, `có` live BM25 terms scoring against transcripts.
+  while leaving the narration in place makes `đoạn video`, `phân cảnh`, `tìm`
+  live BM25 terms scoring against transcripts. So this side keeps the original
+  wording with the narration *deleted*, never reworded.
 
-So each query comes back as a `Rewrite`: translated for the image space, and
-merely cleaned for the speech space. Both forms come out of the same call, which
-is why this costs one round trip rather than two.
+The two jobs get **separate prompts on separate concurrent calls**. Asking for
+both on one line was measurably worse at both: the caption rules bled into the
+deletion rules and the model variously deleted the subject of the query
+("lễ hội đèn lồng", "4 phi hành gia mặc áo đen") or deleted nothing at all.
+Split, each call does its own job cleanly, and the wall clock is the slower of
+the two rather than their sum.
 
 The endpoint is a network hop on the query path, which nothing else here is
 allowed to be, so every failure mode - box down, timeout, malformed output -
-returns None and the caller uses the query as typed for both. A rewrite is an
-improvement, never a dependency.
+falls back to the query as typed. The two halves fail independently: a caption
+that does not arrive does not cost the cleaned form, which is the whole point of
+splitting them. A rewrite is an improvement, never a dependency.
 """
 
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import TYPE_CHECKING
@@ -37,111 +49,184 @@ if TYPE_CHECKING:  # pragma: no cover - import cycle: engine imports this module
 class Rewrite:
     """One query in the two forms retrieval needs."""
 
-    vision: str  # English: SigLIP2's text tower and the BLIP reranker
-    speech: str  # Original language, artifacts stripped: Vietnamese transcripts
+    vision: str  # English caption: SigLIP2's text tower and the BLIP reranker
+    speech: str  # Original language, narration deleted: Vietnamese transcripts
 
 
-SYSTEM_PROMPT = (
-    "You rewrite video-search queries for a retrieval engine that searches"
-    " keyframe images and speech transcripts separately.\n"
-    "For each numbered input query, output exactly one line: the same number, a"
-    ' period, a space, the ENGLISH form, then " || ", then the CLEANED form.\n'
-    "- ENGLISH form: the query translated to English, describing only what is"
-    " visible in the frame. Keep proper nouns, brand names and numbers"
-    " verbatim.\n"
-    "- CLEANED form: the query in its ORIGINAL language with only the"
-    " meta-instructions removed. Do not translate it, do not paraphrase it, do"
-    " not reorder it, do not correct spelling. Keep every content word exactly"
-    " as written.\n"
-    '- From both forms drop meta-instructions ("find the moment", "in the'
-    ' video", "the clip where", "hãy tìm", "đoạn có"), question framing, quotes'
-    " and numbering.\n"
-    "- Do not add, guess or expand detail that is not in the input. Do not merge"
-    " or split queries.\n"
-    "- Output only the numbered lines, nothing else."
+CAPTION_PROMPT = (
+    "You turn a video-search query into a caption for an image search over"
+    " single frames. The query is an operator's description of a moment they"
+    " want to find, wrapped in narration about the video or the search itself.\n"
+    "English, AT MOST 40 words - count them, a longer caption is cut off and"
+    " wasted. Spend those words on what a camera records: the camera angle or"
+    " shot type when the query states one (overhead, top-down, head-on,"
+    " close-up, wide), how many of each thing, colours, clothing, objects, where"
+    " things sit relative to each other, the setting, expressions, the action.\n"
+    "Never drop a visible detail just to be shorter, and never invent one - if"
+    " the query says nothing about the camera, do not mention the camera. Leave"
+    " out only what no frame can show: the narration about the video and the"
+    " search itself. Never merge or split queries.\n"
+    "Output one line per input: the same number, a period, a space, then the"
+    " caption. Nothing else."
+)
+
+CLEAN_PROMPT = (
+    "You strip search-narration out of a video-search query. The result is fed"
+    " to a keyword and semantic search over speech transcripts, so it must stay"
+    " in the language it arrived in.\n"
+    "This is a DELETION task. Copy each numbered input back word for word,"
+    " removing only the words that refer to the video, the clip, the scene, the"
+    " frame or the act of searching. Never translate, paraphrase, reorder,"
+    " summarise, shorten or respell anything you keep. Never delete a word that"
+    " names something in the world - a person, place, object, colour, count,"
+    " action or camera angle. You are striking a few words off the front of a"
+    " sentence, never the sentence itself. When in doubt, keep it.\n"
+    "Examples of the only kind of edit allowed:\n"
+    '  "Đoạn video về tường thuật một cuộc đua xe đạp." -> "tường thuật một'
+    ' cuộc đua xe đạp."\n'
+    '  "Đoạn clip bắt đầu với hình ảnh 4 phi hành gia mặc áo đen." -> "4 phi'
+    ' hành gia mặc áo đen."\n'
+    '  "Tìm phân cảnh với góc quay từ trên cao xuống dõi theo các tay đua." ->'
+    ' "góc quay từ trên cao xuống dõi theo các tay đua."\n'
+    '  "Đoạn clip ghi lại một lễ hội đèn lồng." -> "một lễ hội đèn lồng."\n'
+    '  "Trong khung hình gồm có 3 tay đua đạp thành một đường thẳng." -> "3 tay'
+    ' đua đạp thành một đường thẳng."\n'
+    '  "Cả hai đều mỉm cười, tỏ vẻ thích thú." -> unchanged, nothing to delete.\n'
+    "Output one line per input: the same number, a period, a space, then the"
+    " stripped query. Nothing else."
 )
 
 # One line per query, numbered as the input was. Tolerant about the separator,
 # strict about the number: that is what the ordering check needs.
 _LINE = re.compile(r"^\s*(\d+)\s*[.):]\s*(.+?)\s*$")
-# Divides the two forms on a line. Chosen because no natural query contains it.
-_FORMS = " || "
 
 
 def rewrite_queries(
     texts: list[str], config: "RetrievalConfig", timings: "Timings"
 ) -> list["Rewrite"] | None:
-    """Both forms of each of `texts`, in order - or None.
+    """Both forms of each of `texts`, in order - or None if neither arrived.
 
-    None means nothing was rewritten: the step is off, unconfigured, or the call
-    failed. The caller then uses the query as typed for both forms and reports
-    None, so an operator can tell a query the model left alone from one it never
-    saw.
+    Every query of the request goes in one batch per call. A TRAKE query is an
+    overview plus N events, and per-query round trips would put seconds on the
+    clock for no gain.
 
-    Every query of a request is rewritten in one call. A TRAKE query is an
-    overview plus N events, and N+1 round trips would put seconds on the clock
-    for no gain.
+    None means nothing was rewritten: the step is off, unconfigured, or both
+    calls failed. The caller then uses the query as typed and reports None, so
+    an operator can tell a query the model left alone from one it never saw.
     """
     if not config.rewrite_enabled or not config.rewrite_base_url or not texts:
         return None
 
+    batch = tuple(texts)
     started = time.perf_counter()
     try:
-        return list(
-            _rewrite(
-                tuple(texts),
-                config.rewrite_base_url,
-                config.rewrite_model,
-                config.rewrite_api_key,
-                config.rewrite_timeout_sec,
-            )
-        )
-    except Exception:
-        return None
+        # Both calls at once: the caption is short and the cleaned form is nearly
+        # as long as the query, so run sequentially this would cost the sum of
+        # the two rather than the slower one.
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            pending = [
+                pool.submit(_attempt, prompt, batch, config, budget(batch))
+                for prompt, budget in (
+                    (CAPTION_PROMPT, _caption_budget),
+                    (CLEAN_PROMPT, _clean_budget),
+                )
+            ]
+            captions, cleaned = (task.result() for task in pending)
+
+        if captions is None and cleaned is None:
+            return None
+        # Each half falls back to the query as typed on its own, which is what
+        # separate calls buy: a missing caption must not cost the cleaned form.
+        return [
+            Rewrite(vision=caption, speech=speech)
+            for caption, speech in zip(captions or batch, cleaned or batch)
+        ]
     finally:
         timings.record("rewrite", started)
 
 
+def _caption_budget(texts: tuple[str, ...]) -> int:
+    """Room for a 40-word caption per query, whatever the query's length."""
+    return 64 * len(texts) + 64
+
+
+def _clean_budget(texts: tuple[str, ...]) -> int:
+    """Room to echo every query back, minus a few words.
+
+    Sized from the input, not the query count: the cleaned form is the query
+    itself less its narration, so a 700-character KIS description needs several
+    hundred tokens on its own. Vietnamese runs about two characters per token in
+    this tokenizer.
+    """
+    return sum(len(text) for text in texts) // 2 + 32 * len(texts) + 64
+
+
+def _attempt(
+    system: str, texts: tuple[str, ...], config: "RetrievalConfig", max_tokens: int
+) -> tuple[str, ...] | None:
+    """One call's results, or None if it failed for any reason at all."""
+    try:
+        return _call(
+            system,
+            texts,
+            max_tokens,
+            config.rewrite_base_url,
+            config.rewrite_model,
+            config.rewrite_api_key,
+            config.rewrite_timeout_sec,
+        )
+    except Exception:
+        return None
+
+
 @lru_cache(maxsize=512)
-def _rewrite(
+def _call(
+    system: str,
     texts: tuple[str, ...],
+    max_tokens: int,
     base_url: str,
     model: str,
     api_key: str,
     timeout: float,
-) -> tuple[Rewrite, ...]:
-    """Rewrite one batch, raising on any failure.
+) -> tuple[str, ...]:
+    """Send one batch under one prompt, raising on any failure.
 
     Raising rather than falling back is what makes the cache correct: `lru_cache`
-    does not memoise exceptions, so a successful rewrite is reused for the rest
-    of the session and a failed one is retried the moment the box is back.
+    does not memoise exceptions, so a successful call is reused for the rest of
+    the session and a failed one is retried the moment the box is back.
     """
     numbered = "\n".join(
         f"{index}. {text}" for index, text in enumerate(texts, start=1)
     )
-    content = _post(
+    content, finish_reason = _post(
         base_url,
         {
             "model": model,
             "temperature": 0,
-            # Two forms per query, measured at ~50 output tokens together.
-            "max_tokens": 128 * len(texts) + 64,
+            "max_tokens": max_tokens,
             # Qwen3 serves a thinking mode by default on some vLLM builds, and a
             # reasoning block ahead of the answer is tokens spent on latency.
             "chat_template_kwargs": {"enable_thinking": False},
             "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": system},
                 {"role": "user", "content": numbered},
             ],
         },
         api_key,
         timeout,
     )
+    # A truncated answer still parses - the early lines are intact - so without
+    # this the last query comes back as half a sentence and is searched as if the
+    # operator had typed it that way.
+    if finish_reason != "stop":
+        raise ValueError(f"rewrite stopped on {finish_reason!r}, not a stop token")
     return _parse(content, len(texts))
 
 
-def _post(base_url: str, payload: dict, api_key: str, timeout: float) -> str:
-    """The assistant message from an OpenAI-compatible chat completion."""
+def _post(
+    base_url: str, payload: dict, api_key: str, timeout: float
+) -> tuple[str, str]:
+    """The assistant message and its finish reason, from a chat completion."""
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
     response = httpx.post(
         f"{base_url.rstrip('/')}/chat/completions",
@@ -150,37 +235,27 @@ def _post(base_url: str, payload: dict, api_key: str, timeout: float) -> str:
         timeout=timeout,
     )
     response.raise_for_status()
-    return response.json()["choices"][0]["message"]["content"]
+    choice = response.json()["choices"][0]
+    return choice["message"]["content"], choice["finish_reason"]
 
 
-def _parse(content: str, expected: int) -> tuple[Rewrite, ...]:
-    """The numbered lines of `content`, in index order, split into both forms.
+def _parse(content: str, expected: int) -> tuple[str, ...]:
+    """The numbered lines of `content`, in index order.
 
     All or nothing: a partial parse would silently shift a TRAKE event onto the
     wrong query, which ranks worse than not rewriting at all. Anything short of
-    every index from 1 to `expected`, each carrying both forms, raises and the
-    caller falls back.
+    every index from 1 to `expected` raises and this half falls back.
     """
     # Belt and braces. The competition endpoint emits no reasoning block with
     # thinking disabled, but a different server or model would.
     body = content.rsplit("</think>", 1)[-1]
 
-    found: dict[int, Rewrite] = {}
+    found: dict[int, str] = {}
     for line in body.splitlines():
         match = _LINE.match(line)
-        if not match:
-            continue
-        vision, separator, speech = match.group(2).partition(_FORMS)
-        if not separator:
-            continue
-        found[int(match.group(1))] = Rewrite(_unquote(vision), _unquote(speech))
+        if match:
+            found[int(match.group(1))] = match.group(2).strip().strip("\"'“”")
 
-    if sorted(found) != list(range(1, expected + 1)) or not all(
-        rewrite.vision and rewrite.speech for rewrite in found.values()
-    ):
+    if sorted(found) != list(range(1, expected + 1)) or not all(found.values()):
         raise ValueError(f"expected {expected} rewritten queries, got {sorted(found)}")
     return tuple(found[index] for index in range(1, expected + 1))
-
-
-def _unquote(text: str) -> str:
-    return text.strip().strip("\"'“”")
