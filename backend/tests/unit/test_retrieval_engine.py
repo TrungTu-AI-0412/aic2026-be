@@ -199,6 +199,28 @@ def test_speech_searches_the_original_while_the_image_space_gets_the_rewrite(
     assert spoken == ["người đàn ông đang chạy", "người đàn ông đang chạy"]
 
 
+def test_video_scores_keep_every_video_the_query_names(fake_search):
+    """Stage A of TRAKE wants breadth, not a page of results.
+
+    `retrieve` would collapse this list to one hit per shot and cut it to
+    `top_k`, which is how the top 400 shots of a query end up naming 28 videos
+    for a 100-video pool. Here nothing is dropped. Reranking must not run
+    either: CONFIG leaves it enabled and no model is loaded in this test, so a
+    result at all is the assertion.
+    """
+    _, hits, _, _ = fake_search
+    hits[""] = [
+        frame(0.9, video_id="A", shot_id=0, frame_id=0),
+        frame(0.5, video_id="A", shot_id=0, frame_id=1),
+        frame(0.7, video_id="B", shot_id=3, frame_id=2),
+        frame(0.2, video_id="C", shot_id=9, frame_id=3),
+    ]
+
+    scores = engine.retrieve_video_scores("run", 1, CONFIG, Timings())
+
+    assert scores == {"A": 0.9, "B": 0.7, "C": 0.2}
+
+
 def test_asr_segments_map_to_the_nearest_midpoint_frame_and_dedupe_by_shot():
     frames = [
         frame(
