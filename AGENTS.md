@@ -903,7 +903,13 @@ searches the overview *and* every event globally and keeps the top
 `TRAKE_VIDEO_CANDIDATES` videos, scored as `best overview hit + mean of best
 per-event hits`. Coverage is deliberately not required at that stage: demanding
 a global hit for every event is what dropped correct videos, since a
-fine-grained event does not reach a global top-N against 290k frames. Then
+fine-grained event does not reach a global top-N against 290k frames. That stage reads
+`engine.retrieve_video_scores`, not `retrieve`: collapsing per shot and cutting
+to a page is what a result list wants, and it named 28 videos for a 100-video
+pool, because dense hits pile up inside a few long videos (the top 5000 frames
+of one query name 277 of them). It also skips reranking, for the reason stage B
+does - ITM probabilities near 1.0 summed against cosine scores near 0.2 made the
+candidate pool whatever BLIP happened to see, and cost seconds per request. Then
 `engine.retrieve_per_video` aligns each event *inside* each candidate, one
 filtered query per (video, event) - one query over all of them would return the
 global top-N across them and starve a video that ranks low overall. That stage

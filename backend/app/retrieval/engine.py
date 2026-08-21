@@ -417,6 +417,57 @@ def retrieve_per_video(
     }
 
 
+# Segments the video-selection stage matches against. Deliberately not scaled
+# with the frame pool that stage asks for: frame hits need a wide net because
+# they cluster inside a few long videos, while segments are spread across nearly
+# every video already - 700 of 873 in a top-1000 list, measured - so widening it
+# only cost about a second per query for a bonus that reorders near-ties.
+STAGE_A_SPEECH_TOP_K = 200
+
+
+def _search_and_boost(
+    text: str,
+    top_k: int,
+    config: RetrievalConfig,
+    timings: Timings,
+    video_ids: list[str] | None = None,
+    speech_text: str | None = None,
+    speech_top_k: int | None = None,
+) -> list[ScoredFrame]:
+    """Everything up to ranking: encode, search both spaces, join on time."""
+    vector = encode_query(text, config, timings)
+    # Frame-side lexical search follows `text`, not `speech_text`. Inert today -
+    # `frame_sparse_names` is empty - but when OCR is populated this should
+    # switch, since on-screen text is Vietnamese too.
+    sparse_query = encode_query_sparse(text, config)
+    hits = search_vector(vector, top_k, config, timings, video_ids, sparse_query)
+
+    # Before dedupe on purpose. The bonus is applied per frame, and dedupe keeps
+    # the best frame per shot, so boosting first lets speech decide *which*
+    # frame represents a shot as well as where that shot ranks.
+    segments = (
+        search_speech(
+            speech_text or text,
+            speech_top_k or top_k,
+            config,
+            timings,
+            video_ids,
+        )
+        if config.asr_weight > 0
+        else []
+    )
+    if segments:
+        started = time.perf_counter()
+        try:
+            hits = asr.apply_asr_bonus(
+                hits, segments, config.asr_weight, config.asr_pad_sec
+            )
+        finally:
+            timings.record("asr_bonus", started)
+
+    return hits
+
+
 def retrieve(
     text: str,
     top_k: int,
@@ -434,28 +485,41 @@ def retrieve(
     Vietnamese but "hãy tìm trong video" is not something anyone said in one.
     Defaults to `text`.
     """
-    vector = encode_query(text, config, timings)
-    # Frame-side lexical search follows `text`, not `speech_text`. Inert today -
-    # `frame_sparse_names` is empty - but when OCR is populated this should
-    # switch, since on-screen text is Vietnamese too.
-    sparse_query = encode_query_sparse(text, config)
-    hits = search_vector(vector, top_k, config, timings, video_ids, sparse_query)
-
-    # Before dedupe on purpose. The bonus is applied per frame, and dedupe keeps
-    # the best frame per shot, so boosting first lets speech decide *which*
-    # frame represents a shot as well as where that shot ranks.
-    segments = (
-        search_speech(speech_text or text, top_k, config, timings, video_ids)
-        if config.asr_weight > 0
-        else []
-    )
-    if segments:
-        started = time.perf_counter()
-        try:
-            hits = asr.apply_asr_bonus(
-                hits, segments, config.asr_weight, config.asr_pad_sec
-            )
-        finally:
-            timings.record("asr_bonus", started)
-
+    hits = _search_and_boost(text, top_k, config, timings, video_ids, speech_text)
     return rank(hits, text, top_k, config, timings)
+
+
+def retrieve_video_scores(
+    text: str,
+    top_k: int,
+    config: RetrievalConfig,
+    timings: Timings,
+    speech_text: str | None = None,
+) -> dict[str, float]:
+    """Each video's best score for one query, over as wide a pool as it can get.
+
+    Choosing a *video* is not the same job as showing a page of results, so it
+    does not want the same tail. `retrieve` collapses hits per shot and then
+    truncates to `top_k` shots, and a query whose best frames sit inside a
+    handful of long videos then names almost no videos at all: the top 400
+    shots of "close-up of a white lion head" come from 28 videos - for a
+    100-video candidate pool. Nothing is collapsed or truncated here.
+
+    Reranking is off for the same reason it is off inside a chosen video: ITM
+    probabilities run to 1.0 where cosine scores sit near 0.2, so the head of
+    each query's list would outweigh every other video by scale alone, and
+    picking candidate videos would come down to whichever ones BLIP happened to
+    see. It also cost measured seconds per request to do it.
+    """
+    best: dict[str, float] = {}
+    for hit in _search_and_boost(
+        text,
+        top_k,
+        config,
+        timings,
+        speech_text=speech_text,
+        speech_top_k=STAGE_A_SPEECH_TOP_K,
+    ):
+        if hit.score > best.get(hit.video_id, float("-inf")):
+            best[hit.video_id] = hit.score
+    return best
