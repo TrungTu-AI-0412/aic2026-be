@@ -131,17 +131,21 @@ class SearchVersions(BaseModel):
 class SearchResponse(BaseModel):
     request_id: str
     task: Literal["kis", "qa", "trake"]
-    # What was actually encoded, once the rewriting step translated the query to
-    # English and dropped the operator's phrasing. `[description]` for KIS and
-    # QA; `[overview, *events]` in request order for TRAKE. None when the step is
-    # off or fell back, so an operator can tell a query the model left alone from
-    # one it never saw.
+    # The English form the rewriting step produced, which is what the image
+    # space and the reranker were given. `[description]` for KIS and QA;
+    # `[overview, *events]` in request order for TRAKE. The step also returns a
+    # cleaned form of the original that the speech stage searches with; it is
+    # not reported, being close enough to the request to read off it. None when
+    # the step is off or fell back, so an operator can tell a query the model
+    # left alone from one it never saw.
     rewritten_queries: list[str] | None = Field(
         default=None,
         description=(
-            "The queries actually encoded, after rewriting: [description] for"
-            " KIS/QA, [overview, *events] for TRAKE. Null when rewriting was off"
-            " or failed, in which case the query was searched as typed."
+            "The English forms the rewriting step encoded against the image"
+            " space: [description] for KIS/QA, [overview, *events] for TRAKE."
+            " The speech stage searched a cleaned form of the original, which"
+            " is not reported. Null when rewriting was off or failed, in which"
+            " case the query was searched exactly as typed."
         ),
     )
     results: list[SearchResult]

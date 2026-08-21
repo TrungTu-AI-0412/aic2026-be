@@ -1376,7 +1376,7 @@
               }
             ],
             "title": "Rewritten Queries",
-            "description": "The queries actually encoded, after rewriting: [description] for KIS/QA, [overview, *events] for TRAKE. Null when rewriting was off or failed, in which case the query was searched as typed."
+            "description": "The English forms the rewriting step encoded against the image space: [description] for KIS/QA, [overview, *events] for TRAKE. The speech stage searched a cleaned form of the original, which is not reported. Null when rewriting was off or failed, in which case the query was searched exactly as typed."
           },
           "results": {
             "items": {

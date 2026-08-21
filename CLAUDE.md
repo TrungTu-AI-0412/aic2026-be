@@ -107,18 +107,29 @@ a transformer forward pass plus blocking Qdrant IO would otherwise stall the
 event loop.
 
 Ahead of the engine, `rewrite.rewrite_queries` sends every query of the request
-to the `VLM_BASE_URL` endpoint in one call: the LLM translates to English and
-strips the operator's phrasing, because SigLIP2 and the BLIP reranker are both
-English-centric and would otherwise score "hãy tìm trong video" as part of the
-scene. It is the only network hop the query path takes, so it is on a short
-timeout and **every** failure — box down, timeout, misnumbered output — returns
-`None` and the query runs as typed. `SearchResponse.rewritten_queries` reports
-what was encoded, `None` meaning the step did not run. The speech stage keeps
-the original text (`retrieve(..., speech_text=)`): the transcripts are
-Vietnamese and are searched by term overlap as well as densely, so English
-would drop the lexical half to nothing. `docs/research/mervin.md` argues the
-whole step away in favour of a Vietnamese-native embedding model — the argument
-is against SigLIP2, not against translating for it.
+to the `VLM_BASE_URL` endpoint in one call and gets back **two** forms of each,
+because the two collections want opposite things from the same string:
+
+- `Rewrite.vision` — translated to English, for the SigLIP2 text tower and the
+  BLIP reranker, which would otherwise score "hãy tìm trong video" as part of
+  the scene;
+- `Rewrite.speech` — the query in its original language with only the
+  operator's phrasing removed, for the transcripts. Not translated, because
+  they are Vietnamese and are matched by term overlap as well as densely, so
+  English would drop the lexical half to nothing; but not left as typed either,
+  because `hãy`, `tìm`, `trong`, `video`, `đoạn`, `có` are live BM25 terms
+  scoring against those transcripts.
+
+`retrieve(text, ..., speech_text=)` is where the two part company. Both forms
+come out of one call, so this costs one round trip, not two. It is the only
+network hop the query path takes, so it is on a timeout that has to cover a
+whole TRAKE batch (measured 1.8s for an overview plus five events) and **every**
+failure — box down, timeout, a line missing its `||` separator — returns `None`,
+and the query runs exactly as typed on both sides.
+`SearchResponse.rewritten_queries` reports the English forms only, `None`
+meaning the step did not run. `docs/research/mervin.md` argues the whole step
+away in favour of a Vietnamese-native embedding model — the argument is against
+SigLIP2, not against translating for it.
 
 `engine.retrieve()` is the one shared path for every track:
 

@@ -5,6 +5,7 @@ import pytest
 
 from app.retrieval import tracks
 from app.retrieval.engine import RetrievalConfig
+from app.retrieval.rewrite import Rewrite
 from app.schemas.search import (
     KisSearchRequest,
     QaSearchRequest,
@@ -53,8 +54,8 @@ class FakeEngine:
     responses: dict[str, list[ScoredFrame]]
     per_video_calls: list[tuple[str, list[str]]]
     per_video_responses: dict[str, list[ScoredFrame]]
-    # What the speech stage was handed, which is the query as typed even when
-    # the encoded text was rewritten.
+    # What the speech stage was handed, which is the cleaned original rather
+    # than the English form the image space was given.
     speech_calls: list[str]
 
 
@@ -459,7 +460,7 @@ class TestRewriting:
 
         def _rewrite_queries(texts, config, timings):
             batches.append(list(texts))
-            return [f"EN {text}" for text in texts]
+            return [Rewrite(f"EN {text}", f"VI {text}") for text in texts]
 
         monkeypatch.setattr(tracks, "rewrite_queries", _rewrite_queries)
         return batches
@@ -474,7 +475,9 @@ class TestRewriting:
         )
 
         assert fake_retrieve.calls == ["EN xe hơi đỏ"]
-        assert fake_retrieve.speech_calls == ["xe hơi đỏ"]
+        # Not the raw input: the speech stage gets the cleaned Vietnamese, so
+        # "hãy tìm trong video" stops scoring as a BM25 term against transcripts.
+        assert fake_retrieve.speech_calls == ["VI xe hơi đỏ"]
         assert response.rewritten_queries == ["EN xe hơi đỏ"]
         assert response.results[0].frame_ids == [10]
 
@@ -503,13 +506,13 @@ class TestRewriting:
             ("EN chạy", ["L01_V001"]),
             ("EN nhảy", ["L01_V001"]),
         ]
-        # Both stages hear the query as typed, event order preserved.
+        # Both stages hear the cleaned form, event order preserved.
         assert fake_retrieve.speech_calls == [
-            "cú nhảy",
-            "chạy",
-            "nhảy",
-            "chạy",
-            "nhảy",
+            "VI cú nhảy",
+            "VI chạy",
+            "VI nhảy",
+            "VI chạy",
+            "VI nhảy",
         ]
         assert response.rewritten_queries == ["EN cú nhảy", "EN chạy", "EN nhảy"]
         assert response.results[0].frame_ids == [10, 50]

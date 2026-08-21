@@ -13,6 +13,7 @@ import pytest
 
 from app.retrieval import rewrite
 from app.retrieval.engine import RetrievalConfig, Timings
+from app.retrieval.rewrite import Rewrite
 
 CONFIG = RetrievalConfig(
     frames_collection="frames-v2",
@@ -21,6 +22,7 @@ CONFIG = RetrievalConfig(
     rewrite_model="Qwen/Qwen3.6-27B",
 )
 
+# As typed, translated for the image space, and cleaned for the transcripts.
 VI = [
     "Hãy tìm trong video một người đàn ông mặc áo đỏ đang chạy trên bãi biển",
     "cảnh sát giao thông thổi còi ở ngã tư đường Nguyễn Huệ",
@@ -29,6 +31,19 @@ EN = [
     "a man in a red shirt running on the beach",
     "a traffic police officer blowing a whistle at the Nguyen Hue intersection",
 ]
+CLEAN = [
+    "một người đàn ông mặc áo đỏ đang chạy trên bãi biển",
+    "cảnh sát giao thông thổi còi ở ngã tư đường Nguyễn Huệ",
+]
+BOTH = [Rewrite(vision, speech) for vision, speech in zip(EN, CLEAN)]
+
+
+def reply() -> str:
+    """A well-formed response: one numbered line per query, both forms on it."""
+    return "\n".join(
+        f"{index}. {vision} || {speech}"
+        for index, (vision, speech) in enumerate(zip(EN, CLEAN), start=1)
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -53,11 +68,11 @@ def responder(monkeypatch):
     return sent, replies
 
 
-def test_numbered_output_comes_back_in_input_order(responder):
+def test_both_forms_come_back_in_input_order(responder):
     sent, replies = responder
-    replies.append(f"1. {EN[0]}\n2. {EN[1]}")
+    replies.append(reply())
 
-    assert rewrite.rewrite_queries(VI, CONFIG, Timings()) == EN
+    assert rewrite.rewrite_queries(VI, CONFIG, Timings()) == BOTH
     # One call for the batch, and the input is numbered the way the reply is
     # matched: the two orderings are the same fact.
     assert len(sent) == 1
@@ -67,24 +82,24 @@ def test_numbered_output_comes_back_in_input_order(responder):
 def test_a_reasoning_block_is_stripped(responder):
     """Thinking is disabled in the request, but not every server obeys."""
     _, replies = responder
-    replies.append(
-        f"<think>The user wants Vietnamese translated.</think>\n1. {EN[0]}\n2. {EN[1]}"
-    )
+    replies.append(f"<think>The user wants Vietnamese translated.</think>\n{reply()}")
 
-    assert rewrite.rewrite_queries(VI, CONFIG, Timings()) == EN
+    assert rewrite.rewrite_queries(VI, CONFIG, Timings()) == BOTH
 
 
 def test_surrounding_quotes_and_a_preamble_are_tolerated(responder):
     _, replies = responder
-    replies.append(f'Here you go:\n1. "{EN[0]}"\n2. {EN[1]}\n')
+    replies.append(
+        f'Here you go:\n1. "{EN[0]}" || "{CLEAN[0]}"\n2. {EN[1]} || {CLEAN[1]}\n'
+    )
 
-    assert rewrite.rewrite_queries(VI, CONFIG, Timings()) == EN
+    assert rewrite.rewrite_queries(VI, CONFIG, Timings()) == BOTH
 
 
 def test_a_missing_line_falls_back_rather_than_shifting_the_rest(responder):
     """A partial parse is worse than none: it moves a TRAKE event one query left."""
     _, replies = responder
-    replies.append(f"1. {EN[0]}\n3. something else")
+    replies.append(f"1. {EN[0]} || {CLEAN[0]}\n3. something || else")
 
     assert rewrite.rewrite_queries(VI, CONFIG, Timings()) is None
 
@@ -94,6 +109,38 @@ def test_unnumbered_output_falls_back(responder):
     replies.append("\n".join(EN))
 
     assert rewrite.rewrite_queries(VI, CONFIG, Timings()) is None
+
+
+def test_a_line_carrying_only_one_form_falls_back(responder):
+    """Without the separator there is no telling which form was returned.
+
+    Guessing would hand the image space Vietnamese or the transcripts English -
+    both worse than searching the query as typed.
+    """
+    _, replies = responder
+    replies.append(f"1. {EN[0]}\n2. {EN[1]} || {CLEAN[1]}")
+
+    assert rewrite.rewrite_queries(VI, CONFIG, Timings()) is None
+
+
+def test_an_empty_half_falls_back(responder):
+    _, replies = responder
+    replies.append(f"1. {EN[0]} || \n2. {EN[1]} || {CLEAN[1]}")
+
+    assert rewrite.rewrite_queries(VI, CONFIG, Timings()) is None
+
+
+def test_an_english_input_comes_back_identical_on_both_sides(responder):
+    """No special case for a query that needed no translation."""
+    _, replies = responder
+    english = "the minister announces a 7% growth target"
+    replies.append(f"1. {english} || {english}")
+
+    assert rewrite.rewrite_queries(
+        ["find the clip where the minister announces a 7% growth target"],
+        CONFIG,
+        Timings(),
+    ) == [Rewrite(english, english)]
 
 
 def test_a_dead_endpoint_costs_the_query_nothing_and_is_not_cached(monkeypatch):
@@ -117,12 +164,12 @@ def test_a_dead_endpoint_costs_the_query_nothing_and_is_not_cached(monkeypatch):
 
 def test_a_success_is_reused_for_the_rest_of_the_session(responder):
     sent, replies = responder
-    replies.append(f"1. {EN[0]}\n2. {EN[1]}")
+    replies.append(reply())
 
     first = rewrite.rewrite_queries(VI, CONFIG, Timings())
     second = rewrite.rewrite_queries(VI, CONFIG, Timings())
 
-    assert first == second == EN
+    assert first == second == BOTH
     # A second reply was never queued: `replies.pop(0)` would have raised.
     assert len(sent) == 1
 
@@ -135,6 +182,9 @@ def test_no_endpoint_means_no_call_at_all(monkeypatch):
 
     monkeypatch.setattr(rewrite, "_post", _unreachable)
 
-    assert rewrite.rewrite_queries(VI, replace(CONFIG, rewrite_base_url=None), Timings()) is None
-    assert rewrite.rewrite_queries(VI, replace(CONFIG, rewrite_enabled=False), Timings()) is None
+    for config in (
+        replace(CONFIG, rewrite_base_url=None),
+        replace(CONFIG, rewrite_enabled=False),
+    ):
+        assert rewrite.rewrite_queries(VI, config, Timings()) is None
     assert rewrite.rewrite_queries([], CONFIG, Timings()) is None

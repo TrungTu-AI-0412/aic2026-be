@@ -14,7 +14,7 @@ from app.retrieval.engine import (
     retrieve,
     retrieve_per_video,
 )
-from app.retrieval.rewrite import rewrite_queries
+from app.retrieval.rewrite import Rewrite, rewrite_queries
 from app.schemas.search import (
     EventCandidate,
     EventHit,
@@ -65,12 +65,9 @@ def _frame_search(
     """One hit per shot, one frame per hit."""
     timings = Timings()
     rewritten = rewrite_queries([text], config, timings)
+    query = rewritten[0] if rewritten else Rewrite(text, text)
     hits = retrieve(
-        rewritten[0] if rewritten else text,
-        top_k,
-        config,
-        timings,
-        speech_text=text,
+        query.vision, top_k, config, timings, speech_text=query.speech
     )
 
     results = [
@@ -101,12 +98,12 @@ def search_trake(request: TrakeSearchRequest, config: RetrievalConfig) -> Search
     # batch keeps that at a single round trip either way.
     originals = [request.overview, *request.events]
     rewritten = rewrite_queries(originals, config, timings)
-    queries = rewritten or originals
+    queries = rewritten or [Rewrite(text, text) for text in originals]
 
     if request.video_ids:
         videos = list(dict.fromkeys(request.video_ids))
     else:
-        videos = _candidate_videos(queries, originals, config, timings)
+        videos = _candidate_videos(queries, config, timings)
     if not videos:
         return _response("trake", [], config, timings, rewritten)
 
@@ -119,14 +116,14 @@ def search_trake(request: TrakeSearchRequest, config: RetrievalConfig) -> Search
     localise = replace(config, rerank_enabled=False)
     per_event = [
         retrieve_per_video(
-            query,
+            event.vision,
             videos,
             TRAKE_CANDIDATES_PER_EVENT,
             localise,
             timings,
-            speech_text=original,
+            speech_text=event.speech,
         )
-        for query, original in zip(queries[1:], originals[1:])
+        for event in queries[1:]
     ]
 
     max_gap = (
@@ -165,10 +162,7 @@ def search_trake(request: TrakeSearchRequest, config: RetrievalConfig) -> Search
 
 
 def _candidate_videos(
-    queries: list[str],
-    originals: list[str],
-    config: RetrievalConfig,
-    timings: Timings,
+    queries: list[Rewrite], config: RetrievalConfig, timings: Timings
 ) -> list[str]:
     """Videos worth a per-event search, best first.
 
@@ -179,29 +173,29 @@ def _candidate_videos(
     another chance inside each candidate. A video the overview alone found
     still earns a full alignment pass.
 
-    `queries` and `originals` are the overview followed by the events, rewritten
-    and as typed; the second is what the speech stage searches with.
+    `queries` is the overview followed by the events, each carrying the form the
+    image space searches with and the form the speech stage searches with.
     """
     overview = _best_per_video(
         retrieve(
-            queries[0],
+            queries[0].vision,
             TRAKE_STAGE_A_TOP_K,
             config,
             timings,
-            speech_text=originals[0],
+            speech_text=queries[0].speech,
         )
     )
     per_event = [
         _best_per_video(
             retrieve(
-                query,
+                event.vision,
                 TRAKE_STAGE_A_TOP_K,
                 config,
                 timings,
-                speech_text=original,
+                speech_text=event.speech,
             )
         )
-        for query, original in zip(queries[1:], originals[1:])
+        for event in queries[1:]
     ]
 
     scored: dict[str, float] = {}
@@ -361,13 +355,18 @@ def _response(
     results: list[SearchResult],
     config: RetrievalConfig,
     timings: Timings,
-    rewritten: list[str] | None = None,
+    rewritten: list[Rewrite] | None = None,
 ) -> SearchResponse:
     return SearchResponse(
         request_id=str(uuid4()),
         task=task,
         results=results,
-        rewritten_queries=rewritten,
+        # The English forms only. An operator checking what the model did to
+        # their query is checking the translation; the cleaned form is close
+        # enough to what they typed to read off the request.
+        rewritten_queries=(
+            [query.vision for query in rewritten] if rewritten else None
+        ),
         versions=SearchVersions(
             frames_collection=config.frames_collection,
             clips_collection=config.clips_collection,
