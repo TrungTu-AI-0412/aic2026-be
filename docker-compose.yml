@@ -32,7 +32,8 @@ services:
       - QDRANT_API_KEY=${QDRANT_API_KEY}
     volumes:
       # Mount thư mục data và cache model để không phải tải lại
-      - ./data:/app/data
+      - ./data:/home/ubuntu/tung/aic2026-be/data
+      - ./ingestion.db:/home/ubuntu/tung/aic2026-be/ingestion.db
       - ~/.cache/huggingface:/root/.cache/huggingface
     # Cấu hình GPU Passthrough (Yêu cầu NVIDIA Container Toolkit)
     deploy:
