@@ -57,6 +57,8 @@ class FakeEngine:
     # What the speech stage was handed, which is the cleaned original rather
     # than the English form the image space was given.
     speech_calls: list[str]
+    # Queries the video-selection stage asked about, in order.
+    video_score_calls: list[str]
 
 
 @pytest.fixture
@@ -68,6 +70,7 @@ def fake_retrieve(monkeypatch):
         per_video_calls=[],
         per_video_responses={},
         speech_calls=[],
+        video_score_calls=[],
     )
 
     def _retrieve(text, top_k, config, timings, video_ids=None, speech_text=None):
@@ -97,8 +100,19 @@ def fake_retrieve(monkeypatch):
             for video_id, hits in grouped.items()
         }
 
+    def _retrieve_video_scores(text, top_k, config, timings, speech_text=None):
+        engine.video_score_calls.append(text)
+        engine.calls.append(text)
+        engine.speech_calls.append(speech_text or text)
+        timings.record("encode", time.perf_counter())
+        best: dict[str, float] = {}
+        for hit in engine.responses.get(text, []):
+            best[hit.video_id] = max(best.get(hit.video_id, 0.0), hit.score)
+        return best
+
     monkeypatch.setattr(tracks, "retrieve", _retrieve)
     monkeypatch.setattr(tracks, "retrieve_per_video", _retrieve_per_video)
+    monkeypatch.setattr(tracks, "retrieve_video_scores", _retrieve_video_scores)
     return engine
 
 
