@@ -5,7 +5,7 @@ from typing import Literal
 
 import pyarrow as pa
 import pyarrow.parquet as pq
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.schemas.ingestions import IngestionEntity
 
@@ -14,7 +14,87 @@ class VariableFrameRateError(ValueError):
     """Raised when a single frame rate cannot map frame indexes to time."""
 
 
-class ManifestRow(BaseModel):
+class EnrichmentFields(BaseModel):
+    """Retrieval signals that are optional to the manifest contract.
+
+    These come from the organiser's own artefacts and from ASR, and every one
+    is optional so a manifest written before they existed still validates.
+    They stay out of the required Arrow schemas for the same reason.
+
+    They are declared once and shared by frames and clips because a shot's
+    speech and entities describe the shot, not the entity type used to index
+    it.
+    """
+
+    objects: list[str] = Field(default_factory=list)
+    object_counts: dict[str, int] = Field(default_factory=dict)
+    asr_text: str = ""
+    asr_text_corrected: str = ""
+    asr_entities: list[str] = Field(default_factory=list)
+    # On-screen text, unioned over the shot. Held as recognised, including the
+    # all-caps undiacriticked forms the news ticker uses: `app.features.sparse`
+    # folds diacritics, so "Tam DUnG LuU Thong" still answers a query typed
+    # "tạm dừng lưu thông". Normalising here would throw away the original.
+    ocr_text: str = ""
+    ocr_regions: int = 0
+    # On-screen text a Vietnamese VLM quoted out of the frame. Kept beside
+    # `ocr_text` rather than replacing it: the VLM reads Vietnamese type far
+    # better, but the recogniser sometimes catches small print the VLM skips,
+    # and both feed the one `ocr` sparse vector.
+    ocr_text_vlm: str = ""
+    # Prose description of the frame. A paraphrase, not a transcription — it
+    # gets its own sparse vector so 465 characters of scene description cannot
+    # swamp a headline.
+    caption_vi: str = ""
+    title: str = ""
+    author: str = ""
+    channel_id: str = ""
+    publish_date: str = ""
+    keywords: list[str] = Field(default_factory=list)
+    watch_url: str = ""
+
+    @field_validator("object_counts", mode="before")
+    @classmethod
+    def _accept_arrow_map(cls, value: object) -> object:
+        """Arrow renders `map<string, int32>` as a list of (key, value) pairs.
+
+        `RecordBatch.to_pylist()` does not turn a map column back into a dict,
+        so a manifest carrying `object_counts` failed validation on its very
+        first row and ingestion never started. Accepting the pair list here
+        keeps the fix at the one field whose Arrow type is a map.
+        """
+        if isinstance(value, list):
+            return dict(value)
+        return value
+
+    def enrichment_payload(self) -> dict:
+        """Only the fields that carry something.
+
+        Writing empty strings and empty lists for every point would inflate
+        the collection without making anything findable, and an empty value
+        indexed as a keyword is a term that matches nothing.
+        """
+        values = {
+            "objects": self.objects,
+            "object_counts": self.object_counts,
+            "asr_text": self.asr_text,
+            "asr_text_corrected": self.asr_text_corrected,
+            "asr_entities": self.asr_entities,
+            "ocr_text": self.ocr_text,
+            "ocr_regions": self.ocr_regions,
+            "ocr_text_vlm": self.ocr_text_vlm,
+            "caption_vi": self.caption_vi,
+            "title": self.title,
+            "author": self.author,
+            "channel_id": self.channel_id,
+            "publish_date": self.publish_date,
+            "keywords": self.keywords,
+            "watch_url": self.watch_url,
+        }
+        return {name: value for name, value in values.items() if value}
+
+
+class ManifestRow(EnrichmentFields):
     """Base for manifest rows that become Qdrant points.
 
     Subclasses decide how a row maps to a point id and a payload, so the
@@ -33,21 +113,34 @@ class ManifestRow(BaseModel):
 
 
 class KeyframeManifestRow(ManifestRow):
-    """One sampled keyframe. `original_frame_id` indexes the source video."""
+    """One sampled keyframe.
 
+    `keyframe_n` is the keyframe's 1-based position within its video and is
+    the row's identity. `original_frame_id` indexes the source video and is
+    what a submission reports, but it does **not** identify a keyframe: the
+    organiser's own `map-keyframes` CSVs give two consecutive keyframes the
+    same `frame_idx` in 192 of 873 videos (614 keyframes), because the frame
+    index is derived from a rounded presentation timestamp. Deriving the point
+    id from it made those keyframes overwrite each other in Qdrant with no
+    error raised.
+    """
+
+    keyframe_n: int = Field(ge=1)
     original_frame_id: int = Field(ge=0)
     pts_sec: float = Field(ge=0)
 
     def point_parts(self) -> tuple[str, ...]:
-        return (self.video_id, str(self.original_frame_id))
+        return (self.video_id, f"kf{self.keyframe_n}")
 
     def payload(self) -> dict:
         return {
             "video_id": self.video_id,
             "shot_id": self.shot_id,
+            "keyframe_n": self.keyframe_n,
             "original_frame_id": self.original_frame_id,
             "pts_sec": self.pts_sec,
             "path": self.path,
+            **self.enrichment_payload(),
         }
 
 
@@ -88,6 +181,7 @@ class ClipManifestRow(ManifestRow):
             "start_sec": self.start_sec,
             "end_sec": self.end_sec,
             "path": self.path,
+            **self.enrichment_payload(),
         }
 
 
@@ -142,6 +236,7 @@ KEYFRAME_ARROW_SCHEMA = pa.schema(
     [
         ("video_id", pa.string()),
         ("shot_id", pa.int32()),
+        ("keyframe_n", pa.int32()),
         ("original_frame_id", pa.int64()),
         ("pts_sec", pa.float64()),
         ("path", pa.string()),

@@ -217,6 +217,7 @@ def build_keyframe_manifest(
     shot_index = _load_shot_index(shots_manifest)
     unmatched: list[str] = []
     fallback_shot_ids: dict[str, int] = defaultdict(int)
+    keyframe_counts: dict[str, int] = defaultdict(int)
 
     rows = []
     for record in sorted(
@@ -224,6 +225,7 @@ def build_keyframe_manifest(
     ):
         video_id = record["video_id"]
         frame_id = record["original_frame_id"]
+        keyframe_counts[video_id] += 1
 
         if shot_index is None:
             # No shot information available: give every keyframe its own shot
@@ -243,6 +245,7 @@ def build_keyframe_manifest(
             KeyframeManifestRow(
                 video_id=video_id,
                 shot_id=shot_id,
+                keyframe_n=keyframe_counts[video_id],
                 original_frame_id=frame_id,
                 pts_sec=frame_id / rate,
                 path=record["path"],
