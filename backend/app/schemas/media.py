@@ -72,3 +72,30 @@ class FrameContext(BaseModel):
     width: int
     height: int
     neighbours: list[NeighbourFrame]
+
+
+class TimelineKeyframe(BaseModel):
+    """One sampled frame exposed on the full-video verification timeline."""
+
+    frame_id: int
+    keyframe_n: int
+    pts_sec: float
+    shot_id: int
+    shot_start_sec: float
+    shot_end_sec: float
+
+
+class VideoTimeline(BaseModel):
+    """Source-video metadata plus every sampled frame available for scanning."""
+
+    video_id: str
+    fps_num: int
+    fps_den: int
+    frame_count: int | None
+    duration_sec: float
+    width: int
+    height: int
+    rotation: int
+    is_vfr: bool
+    codec: str
+    keyframes: list[TimelineKeyframe]

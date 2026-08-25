@@ -1,10 +1,10 @@
 from pydantic import ValidationError
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response
 from fastapi.responses import FileResponse
 
 from app.api.deps import get_media_service
-from app.schemas.media import ClipRequest, FrameContext
+from app.schemas.media import ClipRequest, FrameContext, VideoTimeline
 from app.services.media import FrameNotFoundError, MediaService, VideoNotFoundError
 
 router = APIRouter()
@@ -63,6 +63,39 @@ async def stream_video(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     return FileResponse(path)
+
+
+@router.get("/{video_id}/timeline")
+async def get_video_timeline(
+    video_id: str,
+    media_service: MediaService = Depends(get_media_service),
+) -> VideoTimeline:
+    """Metadata and sampled-frame markers for the full verification studio."""
+    try:
+        return await media_service.get_video_timeline(video_id)
+    except VideoNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get(
+    "/{video_id}/source-frames/{frame_id}",
+    responses={200: {"content": {"image/jpeg": {}}}},
+)
+async def get_source_frame(
+    video_id: str,
+    frame_id: int = Path(ge=0),
+    media_service: MediaService = Depends(get_media_service),
+) -> Response:
+    """Decode one exact original-video frame for submission verification."""
+    try:
+        frame = await media_service.get_source_frame(video_id, frame_id)
+    except (VideoNotFoundError, FrameNotFoundError) as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return Response(
+        content=frame.content,
+        media_type=frame.media_type,
+        headers={"Cache-Control": "public, max-age=31536000, immutable"},
+    )
 
 
 @router.get("/{video_id}/clip")

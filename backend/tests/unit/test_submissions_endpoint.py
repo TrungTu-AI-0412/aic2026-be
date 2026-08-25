@@ -104,3 +104,23 @@ def test_task_and_candidate_must_agree(client) -> None:
     )
 
     assert response.status_code == 422
+
+
+def test_trake_frames_must_be_strictly_increasing(client) -> None:
+    response = client.post(
+        "/submissions/export",
+        json={
+            "task": "trake",
+            "event_slot_count": 3,
+            "candidates": [
+                {
+                    "task": "trake",
+                    "video_id": "L22_V001",
+                    "event_frame_ids": [10, 10, 30],
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 422
+    assert "strictly increasing" in response.text

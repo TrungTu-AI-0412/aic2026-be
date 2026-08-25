@@ -61,6 +61,13 @@ class TrakeCandidate(BaseModel):
     def validate_event_frame_ids(self) -> "TrakeCandidate":
         if any(frame_id < 0 for frame_id in self.event_frame_ids):
             raise ValueError("event_frame_ids must be non-negative")
+        if any(
+            current >= following
+            for current, following in zip(
+                self.event_frame_ids, self.event_frame_ids[1:]
+            )
+        ):
+            raise ValueError("event_frame_ids must be strictly increasing")
         return self
 
 

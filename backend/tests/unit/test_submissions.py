@@ -75,6 +75,12 @@ class TestCsv:
             "L22_V001,10,20,30\n"
         )
 
+    def test_trake_frames_must_be_strictly_increasing(self) -> None:
+        with pytest.raises(ValidationError, match="strictly increasing"):
+            trake_request(10, 10, 30)
+        with pytest.raises(ValidationError, match="strictly increasing"):
+            trake_request(10, 9, 30)
+
     def test_answer_containing_a_comma_is_quoted(self) -> None:
         """Otherwise the answer splits into two fields and shifts the row."""
         rendered = formats.to_csv(qa_request("Hà Nội, Việt Nam")).decode()

@@ -340,6 +340,101 @@
         }
       }
     },
+    "/api/v1/videos/{video_id}/timeline": {
+      "get": {
+        "tags": [
+          "Media"
+        ],
+        "summary": "Get Video Timeline",
+        "description": "Metadata and sampled-frame markers for the full verification studio.",
+        "operationId": "get_video_timeline_api_v1_videos__video_id__timeline_get",
+        "parameters": [
+          {
+            "name": "video_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Video Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VideoTimeline"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/videos/{video_id}/source-frames/{frame_id}": {
+      "get": {
+        "tags": [
+          "Media"
+        ],
+        "summary": "Get Source Frame",
+        "description": "Decode one exact original-video frame for submission verification.",
+        "operationId": "get_source_frame_api_v1_videos__video_id__source_frames__frame_id__get",
+        "parameters": [
+          {
+            "name": "video_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Video Id"
+            }
+          },
+          {
+            "name": "frame_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "title": "Frame Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              },
+              "image/jpeg": {}
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/videos/{video_id}/clip": {
       "get": {
         "tags": [
@@ -1617,6 +1712,45 @@
         ],
         "title": "SearchVersions"
       },
+      "TimelineKeyframe": {
+        "properties": {
+          "frame_id": {
+            "type": "integer",
+            "title": "Frame Id"
+          },
+          "keyframe_n": {
+            "type": "integer",
+            "title": "Keyframe N"
+          },
+          "pts_sec": {
+            "type": "number",
+            "title": "Pts Sec"
+          },
+          "shot_id": {
+            "type": "integer",
+            "title": "Shot Id"
+          },
+          "shot_start_sec": {
+            "type": "number",
+            "title": "Shot Start Sec"
+          },
+          "shot_end_sec": {
+            "type": "number",
+            "title": "Shot End Sec"
+          }
+        },
+        "type": "object",
+        "required": [
+          "frame_id",
+          "keyframe_n",
+          "pts_sec",
+          "shot_id",
+          "shot_start_sec",
+          "shot_end_sec"
+        ],
+        "title": "TimelineKeyframe",
+        "description": "One sampled frame exposed on the full-video verification timeline."
+      },
       "TrakeCandidate": {
         "properties": {
           "task": {
@@ -1799,6 +1933,80 @@
           "type"
         ],
         "title": "ValidationError"
+      },
+      "VideoTimeline": {
+        "properties": {
+          "video_id": {
+            "type": "string",
+            "title": "Video Id"
+          },
+          "fps_num": {
+            "type": "integer",
+            "title": "Fps Num"
+          },
+          "fps_den": {
+            "type": "integer",
+            "title": "Fps Den"
+          },
+          "frame_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Frame Count"
+          },
+          "duration_sec": {
+            "type": "number",
+            "title": "Duration Sec"
+          },
+          "width": {
+            "type": "integer",
+            "title": "Width"
+          },
+          "height": {
+            "type": "integer",
+            "title": "Height"
+          },
+          "rotation": {
+            "type": "integer",
+            "title": "Rotation"
+          },
+          "is_vfr": {
+            "type": "boolean",
+            "title": "Is Vfr"
+          },
+          "codec": {
+            "type": "string",
+            "title": "Codec"
+          },
+          "keyframes": {
+            "items": {
+              "$ref": "#/components/schemas/TimelineKeyframe"
+            },
+            "type": "array",
+            "title": "Keyframes"
+          }
+        },
+        "type": "object",
+        "required": [
+          "video_id",
+          "fps_num",
+          "fps_den",
+          "frame_count",
+          "duration_sec",
+          "width",
+          "height",
+          "rotation",
+          "is_vfr",
+          "codec",
+          "keyframes"
+        ],
+        "title": "VideoTimeline",
+        "description": "Source-video metadata plus every sampled frame available for scanning."
       }
     }
   }

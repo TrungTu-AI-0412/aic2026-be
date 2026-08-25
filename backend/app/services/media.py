@@ -17,7 +17,12 @@ from app.features.errors import FeatureExtractionError
 from app.features.media import ClipSegment, sample_clip_frames
 from app.ingestion.manifest import VideoManifestRow, iter_video_rows
 from app.ingestion.video.sampling import keyframe_path
-from app.schemas.media import FrameContext, NeighbourFrame
+from app.schemas.media import (
+    FrameContext,
+    NeighbourFrame,
+    TimelineKeyframe,
+    VideoTimeline,
+)
 
 KEYFRAME_COLUMNS = (
     "video_id",
@@ -60,6 +65,12 @@ class MediaService(Protocol):
         ...
 
     async def get_video_path(self, video_id: str) -> Path:
+        ...
+
+    async def get_video_timeline(self, video_id: str) -> VideoTimeline:
+        ...
+
+    async def get_source_frame(self, video_id: str, frame_id: int) -> FrameImage:
         ...
 
     async def get_clip(self, video_id: str, start_frame: int, end_frame: int) -> ClipVideo:
@@ -118,6 +129,84 @@ def _encode_mp4(images: list[np.ndarray], fps: Fraction) -> bytes:
     return buffer.getvalue()
 
 
+def _encode_jpeg(frame: av.VideoFrame, rotation: int, max_height: int = 720) -> bytes:
+    """Encode a decoded source frame with the same display orientation as keyframes."""
+    displayed_height = frame.width if rotation in (90, 270) else frame.height
+    scale = min(1.0, max_height / displayed_height) if displayed_height else 1.0
+    width = max(2, round(frame.width * scale / 2) * 2)
+    height = max(2, round(frame.height * scale / 2) * 2)
+    image = frame.reformat(width=width, height=height, format="rgb24").to_ndarray()
+    if rotation:
+        image = np.ascontiguousarray(np.rot90(image, k=-(rotation // 90)))
+
+    output = av.VideoFrame.from_ndarray(image, format="rgb24")
+    buffer = BytesIO()
+    with av.open(buffer, "w", format="mjpeg") as container:
+        stream = container.add_stream("mjpeg", rate=1)
+        stream.width = output.width
+        stream.height = output.height
+        stream.pix_fmt = "yuvj420p"
+        for packet in stream.encode(output):
+            container.mux(packet)
+        for packet in stream.encode():
+            container.mux(packet)
+    return buffer.getvalue()
+
+
+def _decode_source_frame(
+    path: str,
+    frame_id: int,
+    fps_num: int,
+    fps_den: int,
+    rotation: int,
+) -> bytes:
+    """Decode one exact CFR frame, falling back to a sequential count if needed."""
+    rate = Fraction(fps_num, fps_den)
+    target_sec = frame_id / rate
+
+    def decode_by_timestamp() -> bytes | None:
+        with av.open(path) as container:
+            if not container.streams.video:
+                return None
+            stream = container.streams.video[0]
+            stream.thread_type = "NONE"
+            if frame_id and stream.time_base is not None:
+                offset = max(0, int(target_sec / float(stream.time_base)))
+                container.seek(offset, stream=stream, backward=True)
+            for frame in container.decode(stream):
+                if frame.time is None:
+                    continue
+                decoded_id = round(float(frame.time) * rate)
+                if decoded_id == frame_id:
+                    return _encode_jpeg(frame, rotation)
+                if decoded_id > frame_id:
+                    return None
+        return None
+
+    try:
+        content = decode_by_timestamp()
+        if content is not None:
+            return content
+
+        # Frame IDs are defined by sequential presentation-order decode. This
+        # slower path protects exactness for files with unusual timestamp origins.
+        with av.open(path) as container:
+            if not container.streams.video:
+                raise FrameNotFoundError("source has no video stream")
+            stream = container.streams.video[0]
+            stream.thread_type = "NONE"
+            for decoded_id, frame in enumerate(container.decode(stream)):
+                if decoded_id == frame_id:
+                    return _encode_jpeg(frame, rotation)
+    except av.FFmpegError as exc:
+        raise FrameNotFoundError(f"cannot decode source frame {frame_id}: {exc}") from exc
+
+    raise FrameNotFoundError(f"source frame {frame_id} is outside the video")
+
+
+_decode_source_frame_cached = lru_cache(maxsize=256)(_decode_source_frame)
+
+
 class LocalMediaService:
     """Serve keyframes off disk and cut clips out of the source videos.
 
@@ -174,6 +263,52 @@ class LocalMediaService:
         if not path.is_relative_to(self._root) or not path.is_file():
             raise VideoNotFoundError(f"video file for '{video_id}' is not readable")
         return path
+
+    async def get_video_timeline(self, video_id: str) -> VideoTimeline:
+        video = await self._video(video_id)
+        keyframes = await to_thread(
+            _video_keyframes, self._frames_manifest, video_id
+        )
+        return VideoTimeline(
+            video_id=video_id,
+            fps_num=video.fps_num,
+            fps_den=video.fps_den,
+            frame_count=video.nb_frames,
+            duration_sec=video.duration_sec,
+            width=video.width,
+            height=video.height,
+            rotation=video.rotation,
+            is_vfr=video.is_vfr,
+            codec=video.codec,
+            keyframes=[
+                TimelineKeyframe(
+                    frame_id=row[0],
+                    keyframe_n=row[1],
+                    pts_sec=row[2],
+                    shot_id=row[3],
+                    shot_start_sec=row[4],
+                    shot_end_sec=row[5],
+                )
+                for row in keyframes
+            ],
+        )
+
+    async def get_source_frame(self, video_id: str, frame_id: int) -> FrameImage:
+        video = await self._video(video_id)
+        path = await self.get_video_path(video_id)
+        if video.nb_frames is not None and frame_id >= video.nb_frames:
+            raise FrameNotFoundError(
+                f"source frame {frame_id} of '{video_id}' is outside the video"
+            )
+        content = await to_thread(
+            _decode_source_frame_cached,
+            str(path),
+            frame_id,
+            video.fps_num,
+            video.fps_den,
+            video.rotation,
+        )
+        return FrameImage(content, "image/jpeg")
 
     async def get_frame_context(
         self, video_id: str, frame_id: int, radius: int
