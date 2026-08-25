@@ -1,6 +1,15 @@
 .env
+.env.*
+!.env.example
+kaggle.json*
 __pycache__/
 venv/
+.venv*/
+.DS_Store
 data/*
 artifacts/
 *.npy
+# VPN client configs embed a private key.
+*.ovpn
+# Competitive notes — never published.
+private/
