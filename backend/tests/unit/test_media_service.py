@@ -174,6 +174,60 @@ def test_stream_endpoint_serves_byte_ranges(tmp_path):
     assert client.get("/videos/L99_V999/stream").status_code == 404
 
 
+def test_video_timeline_exposes_exact_rate_and_all_keyframes(tmp_path):
+    service = LocalMediaService(data_root=str(build_root(tmp_path)))
+
+    timeline = asyncio.run(service.get_video_timeline(VIDEO_ID))
+
+    assert (timeline.fps_num, timeline.fps_den) == (RATE, 1)
+    assert timeline.frame_count == 20
+    assert timeline.duration_sec == pytest.approx(2.0)
+    assert [frame.frame_id for frame in timeline.keyframes] == [0, 2, 4, 6, 8, 10]
+    assert timeline.keyframes[3].shot_start_sec == pytest.approx(0.6)
+
+
+def test_source_frame_is_decoded_by_exact_original_frame_id(tmp_path):
+    service = LocalMediaService(data_root=str(build_root(tmp_path)))
+
+    source_frame = asyncio.run(service.get_source_frame(VIDEO_ID, 7))
+
+    assert source_frame.media_type == "image/jpeg"
+    with av.open(str(_write(tmp_path / "source-frame.jpg", source_frame.content))) as image:
+        decoded = next(image.decode(video=0)).to_ndarray(format="rgb24")
+    assert float(np.mean(decoded)) == pytest.approx(70, abs=8)
+
+    with pytest.raises(FrameNotFoundError, match="outside the video"):
+        asyncio.run(service.get_source_frame(VIDEO_ID, 20))
+
+
+def test_timeline_and_source_frame_endpoints(tmp_path):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from app.api.deps import get_media_service
+    from app.api.endpoints import media as endpoint
+
+    root = build_root(tmp_path)
+    app = FastAPI()
+    app.include_router(endpoint.router, prefix="/videos")
+    app.dependency_overrides[get_media_service] = lambda: LocalMediaService(
+        data_root=str(root)
+    )
+    client = TestClient(app)
+
+    timeline = client.get(f"/videos/{VIDEO_ID}/timeline")
+    assert timeline.status_code == 200
+    assert timeline.json()["fps_num"] == RATE
+    assert len(timeline.json()["keyframes"]) == 6
+
+    frame = client.get(f"/videos/{VIDEO_ID}/source-frames/7")
+    assert frame.status_code == 200
+    assert frame.headers["content-type"] == "image/jpeg"
+    assert "immutable" in frame.headers["cache-control"]
+    assert client.get(f"/videos/{VIDEO_ID}/source-frames/-1").status_code == 422
+    assert client.get(f"/videos/{VIDEO_ID}/source-frames/20").status_code == 404
+
+
 def test_frame_context_carries_metadata_and_neighbours(tmp_path):
     service = LocalMediaService(data_root=str(build_root(tmp_path)))
 
