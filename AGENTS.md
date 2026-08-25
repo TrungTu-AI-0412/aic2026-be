@@ -665,24 +665,47 @@ Current shared stages are:
 
 ```text
 rewrite.rewrite_queries
-  -> VLM_BASE_URL /chat/completions
-  -> Rewrite(vision=<English>, speech=<original, cleaned>)
+  -> CAPTION_PROMPT ->| concurrent |-> VLM_BASE_URL /chat/completions
+  -> CLEAN_PROMPT   ->|            |
+  -> Rewrite(vision=<English caption>, speech=<original, narration deleted>)
 ```
 
-Runs in `tracks.py`, ahead of the engine, and rewrites every query of the
-request in one call — a TRAKE overview plus N events is one round trip, not
-N+1. Each query comes back in **two** forms, because the two collections want
-opposite things from the same string:
+Runs in `tracks.py`, ahead of the engine. Every query of the request goes in one
+batch per call — a TRAKE overview plus N events is two round trips, not 2(N+1).
 
-- `vision` — translated to English, describing only what is in the frame. This
-  is what `encode_query` and the BLIP reranker get: both are English-centric
-  and would otherwise score "hãy tìm trong video" as part of the scene.
-- `speech` — the query in its **original language**, with only the
-  meta-instructions removed; no translation, paraphrase, reordering or spelling
-  correction. This is what `search_speech` gets. Translating for it would drop
-  the lexical half of the speech search to nothing, since the transcripts are
-  Vietnamese; leaving it as typed makes `hãy`, `tìm`, `trong`, `video`, `đoạn`,
-  `có` live BM25 terms scoring against those transcripts.
+The two jobs get **separate prompts on separate concurrent calls**. This is not
+incidental: asking one prompt for both forms on one line was measurably worse at
+both, because the caption rules and the deletion rules contaminated each other.
+Across three prompt versions the merged call variously deleted the subject of the
+query (`lễ hội đèn lồng`, `4 phi hành gia mặc áo đen`, the cyclists and their
+uniforms) or performed no deletion at all. Split, each call is reliable, and
+because they run concurrently the wall clock is the slower of the two rather
+than their sum — measured 2.8s for a 700-character query where the cleaning call
+alone was 2.76s.
+
+The two forms, because the two collections want opposite things:
+
+- `vision` — an English **caption** of what is on screen, capped at 40 words. This is what `encode_query` and the BLIP reranker get. Deliberately
+  not a translation, for two reasons: both models are English-centric and would
+  otherwise score "hãy tìm trong video" as part of the scene, and the SigLIP2
+  text tower reads exactly **64 tokens** (`padding="max_length"`,
+  `truncation=True` in `features/multimodal.embed_text`). A literal translation
+  of a 700-character KIS description runs well past that and is cut without a
+  word of warning, losing the tail where the distinguishing detail sits. 40 words
+  (~50 tokens) is the budget matched to that window. Capping it lower is not
+  free: at 20 words the model dropped the clothing, the setting and the *camera
+  angle*, which is visible and highly discriminative. The prompt keeps a stated
+  shot type and is told never to invent one - instructed to keep the angle, it
+  will otherwise hallucinate "close-up of" onto queries that said nothing about
+  the camera.
+- `speech` — the query in its **original language** with the narration phrases
+  deleted. This is what `search_speech` gets, and in `asr_only` mode it is the
+  only query there is. Deletion, not rewriting: no translation, paraphrase,
+  reordering or spelling correction, so whatever survives is word-for-word what
+  the operator typed. Translating for it would drop the lexical half of the
+  speech search to nothing, since the transcripts are Vietnamese; leaving it as
+  typed makes `đoạn video mô tả`, `phân cảnh bắt đầu là`, `hãy tìm` live BM25
+  terms scoring against those transcripts.
 
 `retrieve(text, ..., speech_text=)` and `retrieve_per_video` are where the two
 part company. A caller that passes only `text` gets the old behaviour, one
@@ -693,9 +716,15 @@ This is the only network hop on the query path, so:
 - the timeout (`QUERY_REWRITE_TIMEOUT_SEC`, default 6s) has to cover a whole
   TRAKE batch, not one query — the step is output-token-bound, and an overview
   plus five events in two forms measured 1.8s;
-- **every** failure — unreachable box, timeout, misnumbered output, a line
-  missing its ` || ` separator — returns `None` and the query is searched
-  exactly as typed on both sides;
+- **every** failure — unreachable box, timeout, misnumbered output, a
+  `finish_reason` other than `stop` — falls back to the query as typed, and the
+  two halves fail independently: a caption that does not arrive must not cost
+  the cleaned form. `None` is returned only when both calls failed;
+- the `finish_reason` check is load-bearing rather than belt-and-braces: a
+  truncated reply still parses, since the separator sits on the first line long
+  before the cut, so without it the last query is silently searched as half a
+  sentence. `max_tokens` is sized from the input length for the same reason —
+  the cleaned form is nearly as long as the query itself;
 - a partial parse is treated as a failure, since a shifted line would move a
   TRAKE event onto the wrong query, and a line with only one form gives no way
   to tell which form it is;
@@ -874,7 +903,13 @@ searches the overview *and* every event globally and keeps the top
 `TRAKE_VIDEO_CANDIDATES` videos, scored as `best overview hit + mean of best
 per-event hits`. Coverage is deliberately not required at that stage: demanding
 a global hit for every event is what dropped correct videos, since a
-fine-grained event does not reach a global top-N against 290k frames. Then
+fine-grained event does not reach a global top-N against 290k frames. That stage reads
+`engine.retrieve_video_scores`, not `retrieve`: collapsing per shot and cutting
+to a page is what a result list wants, and it named 28 videos for a 100-video
+pool, because dense hits pile up inside a few long videos (the top 5000 frames
+of one query name 277 of them). It also skips reranking, for the reason stage B
+does - ITM probabilities near 1.0 summed against cosine scores near 0.2 made the
+candidate pool whatever BLIP happened to see, and cost seconds per request. Then
 `engine.retrieve_per_video` aligns each event *inside* each candidate, one
 filtered query per (video, event) - one query over all of them would return the
 global top-N across them and starve a video that ranks low overall. That stage

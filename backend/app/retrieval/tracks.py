@@ -13,6 +13,7 @@ from app.retrieval.engine import (
     Timings,
     retrieve,
     retrieve_per_video,
+    retrieve_video_scores,
     search_asr_only,
 )
 from app.retrieval.rewrite import Rewrite, rewrite_queries
@@ -32,10 +33,16 @@ from app.vector_store.search import ScoredFrame
 
 # Videos that survive the global stage and earn per-event searches of their own.
 # This is the cost dial: the second stage runs one Qdrant query per
-# (video, event) pair.
-TRAKE_VIDEO_CANDIDATES = 30
-# Hits per query in the video-selection stage.
-TRAKE_STAGE_A_TOP_K = 100
+# (video, event) pair, serially, so 100 videos x 5 events is 500 round trips.
+# 100 because a submission ranks 100 lines and the track can return at most one
+# result per candidate video.
+TRAKE_VIDEO_CANDIDATES = 100
+# Hits per query in the video-selection stage, over-fetched into the Qdrant
+# limit like anywhere else - so this is really the width of the pool, since
+# `retrieve_video_scores` neither collapses nor truncates what comes back. Far
+# above TRAKE_VIDEO_CANDIDATES on purpose: dense hits cluster inside a few long
+# videos, so the top 5000 frames of a query name a few hundred videos, not 5000.
+TRAKE_STAGE_A_TOP_K = 1000
 # Candidates per event *within one video*, not globally as this once meant.
 TRAKE_CANDIDATES_PER_EVENT = 20
 # Runners-up offered per event so an operator can override a chosen frame.
@@ -212,27 +219,28 @@ def _candidate_videos(
     another chance inside each candidate. A video the overview alone found
     still earns a full alignment pass.
 
+    Each query is reduced to one score per video by `retrieve_video_scores`
+    rather than to a page of hits: this stage is judged on how many *videos* it
+    names, and a shot-collapsed top-N names hardly any, because dense hits pile
+    up inside a few long videos.
+
     `queries` is the overview followed by the events, each carrying the form the
     image space searches with and the form the speech stage searches with.
     """
-    overview = _best_per_video(
-        retrieve(
-            queries[0].vision,
+    overview = retrieve_video_scores(
+        queries[0].vision,
+        TRAKE_STAGE_A_TOP_K,
+        config,
+        timings,
+        speech_text=queries[0].speech,
+    )
+    per_event = [
+        retrieve_video_scores(
+            event.vision,
             TRAKE_STAGE_A_TOP_K,
             config,
             timings,
-            speech_text=queries[0].speech,
-        )
-    )
-    per_event = [
-        _best_per_video(
-            retrieve(
-                event.vision,
-                TRAKE_STAGE_A_TOP_K,
-                config,
-                timings,
-                speech_text=event.speech,
-            )
+            speech_text=event.speech,
         )
         for event in queries[1:]
     ]
@@ -244,15 +252,6 @@ def _candidate_videos(
 
     ranked = sorted(scored.items(), key=lambda item: item[1], reverse=True)
     return [video_id for video_id, _ in ranked[:TRAKE_VIDEO_CANDIDATES]]
-
-
-def _best_per_video(hits: list[ScoredFrame]) -> dict[str, float]:
-    """Each video's best score in one result list."""
-    best: dict[str, float] = {}
-    for hit in hits:
-        if hit.score > best.get(hit.video_id, float("-inf")):
-            best[hit.video_id] = hit.score
-    return best
 
 
 def _within_gap(previous: ScoredFrame, following: ScoredFrame, max_gap: float) -> bool:
