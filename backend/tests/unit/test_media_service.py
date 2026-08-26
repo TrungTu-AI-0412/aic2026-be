@@ -220,6 +220,10 @@ def test_timeline_and_source_frame_endpoints(tmp_path):
     assert timeline.json()["fps_num"] == RATE
     assert len(timeline.json()["keyframes"]) == 6
 
+    keyframe = client.get(f"/videos/{VIDEO_ID}/frames/5")
+    assert keyframe.status_code == 200
+    assert "immutable" in keyframe.headers["cache-control"]
+
     frame = client.get(f"/videos/{VIDEO_ID}/source-frames/7")
     assert frame.status_code == 200
     assert frame.headers["content-type"] == "image/jpeg"
