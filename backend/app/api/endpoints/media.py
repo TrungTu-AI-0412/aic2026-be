@@ -23,7 +23,13 @@ async def get_frame(
     except FrameNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
-    return Response(content=frame.content, media_type=frame.media_type)
+    # Keyframes are content-addressed by (video_id, frame_id) and never
+    # rewritten, so a timeline hover-scrub re-shows them from cache.
+    return Response(
+        content=frame.content,
+        media_type=frame.media_type,
+        headers={"Cache-Control": "public, max-age=31536000, immutable"},
+    )
 
 
 @router.get("/{video_id}/frames/{frame_id}/context")
