@@ -1036,6 +1036,18 @@
             "type": "integer",
             "title": "Height"
           },
+          "youtube_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Youtube Id",
+            "description": "YouTube id of the source upload, for previewing at `pts_sec` via an embed instead of range-reading the local mp4. None when `media-info/<video_id>.json` is missing a watch URL."
+          },
           "neighbours": {
             "items": {
               "$ref": "#/components/schemas/NeighbourFrame"
@@ -1982,6 +1994,18 @@
           "codec": {
             "type": "string",
             "title": "Codec"
+          },
+          "youtube_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Youtube Id",
+            "description": "YouTube id of the source upload, or None."
           },
           "keyframes": {
             "items": {

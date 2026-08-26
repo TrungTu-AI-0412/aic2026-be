@@ -272,3 +272,25 @@ def test_frame_context_without_a_frames_manifest_says_so(tmp_path):
 
     with pytest.raises(FrameNotFoundError):
         asyncio.run(service.get_frame_context(VIDEO_ID, 0, radius=1))
+
+
+def test_youtube_id_comes_from_media_info(tmp_path):
+    root = build_root(tmp_path)
+    media_info = root / "media-info"
+    media_info.mkdir()
+    (media_info / f"{VIDEO_ID}.json").write_text(
+        '{"watch_url": "https://youtube.com/watch?v=Rzpw5WR7nAY"}', encoding="utf-8"
+    )
+    service = LocalMediaService(data_root=str(root))
+
+    context = asyncio.run(service.get_frame_context(VIDEO_ID, 4, radius=1))
+    timeline = asyncio.run(service.get_video_timeline(VIDEO_ID))
+
+    assert context.youtube_id == "Rzpw5WR7nAY"
+    assert timeline.youtube_id == "Rzpw5WR7nAY"
+
+
+def test_youtube_id_is_none_without_media_info(tmp_path):
+    service = LocalMediaService(data_root=str(build_root(tmp_path)))
+
+    assert asyncio.run(service.get_video_timeline(VIDEO_ID)).youtube_id is None
