@@ -11,5 +11,9 @@ artifacts/
 *.npy
 # VPN client configs embed a private key.
 *.ovpn
+# SSH keys. This repo is public and `git add -A` would publish one.
+*.pem
+*.key
+id_rsa*
 # Competitive notes — never published.
 private/
