@@ -16,6 +16,14 @@ def embed_text(feature_profile: str, text: str) -> list[float]:
 
     profile = get_profile(feature_profile)
     runtime = _load_runtime(profile)
+
+    if profile.api == "jina":
+        # Takes the string itself and returns a numpy array already, so there
+        # is no processor step and nothing to move to the device by hand.
+        with runtime.torch.inference_mode():
+            features = runtime.model.encode_text([text])
+        return pool_features(np.asarray(features), profile.dimension)
+
     inputs = runtime.processor(
         text=[text],
         padding="max_length",
@@ -39,6 +47,11 @@ def embed_images(
 
     for start in range(0, len(images), profile.image_batch_size):
         batch = images[start : start + profile.image_batch_size]
+        if profile.api == "jina":
+            with runtime.torch.inference_mode():
+                features = runtime.model.encode_image(_as_pil(batch))
+            chunks.append(np.asarray(features))
+            continue
         inputs = runtime.processor(images=list(batch), return_tensors="pt")
         inputs = _move_inputs(inputs, runtime)
         with runtime.torch.inference_mode():
@@ -46,6 +59,16 @@ def embed_images(
         chunks.append(_as_numpy(features))
 
     return pool_features(np.concatenate(chunks, axis=0), profile.dimension)
+
+
+def _as_pil(images: Sequence[np.ndarray]) -> list:
+    """Jina's encoder takes PIL images, not the arrays the rest of this uses."""
+    from PIL import Image
+
+    return [
+        image if not isinstance(image, np.ndarray) else Image.fromarray(image)
+        for image in images
+    ]
 
 
 def pool_features(features: np.ndarray, expected_dimension: int) -> list[float]:
@@ -112,8 +135,18 @@ def _load_runtime(profile: FeatureProfile) -> _ModelRuntime:
         dtype = torch.float32
 
     try:
-        processor = AutoProcessor.from_pretrained(profile.model_id)
-        model = AutoModel.from_pretrained(profile.model_id, torch_dtype=dtype)
+        if profile.api == "jina":
+            # No AutoProcessor: the remote code bundles its own tokenizer and
+            # image transform behind `encode_text` / `encode_image`.
+            processor = None
+            model = AutoModel.from_pretrained(
+                profile.model_id,
+                trust_remote_code=profile.trust_remote_code,
+                torch_dtype=dtype,
+            )
+        else:
+            processor = AutoProcessor.from_pretrained(profile.model_id)
+            model = AutoModel.from_pretrained(profile.model_id, torch_dtype=dtype)
         model = model.to(device).eval()
     except (OSError, ValueError) as exc:
         raise FeatureExtractionError(

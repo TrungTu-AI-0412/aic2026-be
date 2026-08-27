@@ -26,6 +26,7 @@ async def test_lists_registered_feature_profiles(service):
 
     assert [profile.name for profile in response.profiles] == [
         "clip-b32-v1",
+        "jina-clip-v2",
         "siglip2-giant-opt-patch16-384-v1",
         "siglip2-so400m-patch14-384-v1",
     ]
