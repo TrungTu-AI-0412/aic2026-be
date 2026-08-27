@@ -97,16 +97,38 @@ event loop. `engine.retrieve()` is the one shared path for every track:
    over-fetched by `dedupe.DEFAULT_OVERFETCH`
 3. `fusion.fuse_frames_and_clips` → combines both lists on `(video_id, shot_id)`,
    imputing each list's worst observed score for one-sided shots
-4. `dedupe.dedupe_by_shot` → one hit per shot, since ~1 keyframe/sec means a
+4. `boost.reciprocal_rank_fuse` → folds in a second, OCR-only query
+5. `dedupe.dedupe_by_shot` → one hit per shot, since ~1 keyframe/sec means a
    single shot produces many near-identical vectors
-5. `rerank.rerank` → BLIP ITM cross-encoder over the top `RERANK_TOP_N`; the
+6. `rerank.rerank` → BLIP ITM cross-encoder over the top `RERANK_TOP_N`; the
    reranked head stays a block because ITM probabilities are not comparable
    with the cosine scores below it
+
+Step 4 exists because a lexical score and a cosine similarity have no shared
+scale, so the two are fused on *rank*, not magnitude. When `OCR_BOOST_ENABLED`
+is on, `engine.fused_sparse_names` drops `ocr` from the server-side prefetch and
+`search_sparse` queries that slot on its own — on-screen text must be counted
+once, at the configured weight, not once again inside Qdrant's RRF. Turning the
+flag off restores the plain three-slot hybrid. It costs one extra sparse query
+per `retrieve()`, which is per-event on TRAKE.
+
+`OCR_BOOST_WEIGHT` defaults to **0.05**, and that number is measured rather
+than argued. It shipped at 0.5 on the reasoning that half strength would keep
+on-screen text a tie-breaker; on 300 queries against the real index that was
+*worse than turning the channel off* (recall@1 0.140 vs 0.230). The curve is
+monotonic down to 0.05, where the channel is finally worth +22% relative
+recall@1 over leaving `ocr` inside Qdrant's fusion. `app/ranking/boost.py`
+carries the full table and the caveat that the query set is speech-derived, so
+a set written from on-screen text would likely prefer a higher weight.
 
 `tracks.py` decides only *what* to encode and how to shape results. KIS/QA return
 one frame per hit; QA leaves `answer=None` (no VQA model is wired in); TRAKE
 searches each event separately and picks, per video, the highest-scoring
-strictly frame-increasing selection covering every event.
+strictly frame-increasing selection covering every event. `POST /search/ocr` is
+the same OCR channel on its own — no image encoder and no reranker, because BLIP
+ITM cannot read a ticker and would demote exactly the frames the query asked
+for. Every result carries `ocr_text`, both recognisers' readings joined, as the
+evidence for the hit.
 
 **Ingestion path** (`app/ingestion/`):
 
