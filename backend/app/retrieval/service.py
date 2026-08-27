@@ -6,6 +6,7 @@ from app.retrieval import tracks
 from app.retrieval.engine import RetrievalConfig
 from app.schemas.search import (
     KisSearchRequest,
+    OcrSearchRequest,
     QaSearchRequest,
     SearchResponse,
     TrakeSearchRequest,
@@ -31,3 +32,8 @@ class QdrantSearchService:
 
     async def search_trake(self, request: TrakeSearchRequest) -> SearchResponse:
         return await run_in_threadpool(tracks.search_trake, request, self._config)
+
+    async def search_ocr(self, request: OcrSearchRequest) -> SearchResponse:
+        # Off the event loop like the rest, even though this one runs no
+        # model: the Qdrant call still blocks on IO.
+        return await run_in_threadpool(tracks.search_ocr, request, self._config)

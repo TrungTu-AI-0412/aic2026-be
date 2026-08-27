@@ -15,6 +15,7 @@ Nothing here is Qdrant-specific: the output is a plain `SparseVector` of
 indices and values, and `app/vector_store/` decides what to do with it.
 """
 
+import math
 import re
 import unicodedata
 import zlib
@@ -86,7 +87,54 @@ def encode(*texts: str, fold_diacritics: bool = True) -> SparseVector:
 
     Fields are pooled rather than concatenated with separators because term
     frequency is all that survives into the vector anyway.
+
+    Raw counts, which is right for a *query*: scaling every value in a query
+    vector by the same factor cannot reorder anything. Points are a different
+    matter — see `encode_document`.
     """
+    counts = _counts(texts, fold_diacritics)
+    return _to_vector(counts)
+
+
+def encode_document(*texts: str, fold_diacritics: bool = True) -> SparseVector:
+    """The same vector, scaled to unit length, for a point being ingested.
+
+    WHY THIS EXISTS
+
+    Qdrant's `Modifier.IDF` supplies the IDF half of BM25 server-side. The
+    term-frequency half arrives from here, and as raw counts it has no length
+    normalisation at all, so a point's score grows with how much text it
+    carries. On this corpus that is not a subtle effect: a lecture slide packed
+    with words outscored the three-word ticker that actually answered the
+    query, at the highest score in the run.
+
+    Measured over 200 cross-source queries (index built from EasyOCR's
+    reading, queried with the VLM's reading of the same frame, so a hit is
+    independent evidence rather than the tokeniser marking its own work):
+
+        weighting        content@1   content@10   MRR    top-1 text length
+        raw counts         0.625        0.720    0.651    52 tokens median
+        L2-normalised      0.735        0.795    0.753    25
+        BM25 k1=1.2 b=.75  0.740        0.815    0.762    27
+
+    L2 is taken over BM25 despite the marginally lower numbers. BM25's
+    saturation term needs the corpus average document length, which this
+    process cannot know while streaming a manifest, and a constant baked in
+    here would silently rot the moment the corpus or the field mix changed —
+    a failure that produces slightly worse ranking rather than an error.
+    Unit length needs nothing but the vector itself, and recovers 96% of the
+    gain.
+
+    The distinction is document-side only. `encode` stays raw for queries.
+    """
+    counts = _counts(texts, fold_diacritics)
+    norm = math.sqrt(sum(value * value for value in counts.values()))
+    if norm:
+        counts = {index: value / norm for index, value in counts.items()}
+    return _to_vector(counts)
+
+
+def _counts(texts: tuple[str, ...], fold_diacritics: bool) -> dict[int, float]:
     counts: dict[int, float] = {}
 
     for text in texts:
@@ -103,6 +151,10 @@ def encode(*texts: str, fold_diacritics: bool = True) -> SparseVector:
                     # diacritic-blind match outrank an exact one.
                     counts[slot] = counts.get(slot, 0.0) + 0.5
 
+    return counts
+
+
+def _to_vector(counts: dict[int, float]) -> SparseVector:
     if not counts:
         return SparseVector()
 

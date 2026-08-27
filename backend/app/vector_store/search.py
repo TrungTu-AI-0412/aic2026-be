@@ -32,6 +32,13 @@ class ScoredFrame:
     # source video, and that needs timestamps, not frame indexes.
     start_sec: float | None = None
     end_sec: float | None = None
+    # The on-screen text this point carries, for an operator to confirm a
+    # lexical hit against without opening the frame. Both recognisers are
+    # joined rather than one being preferred: the VLM reading has correct
+    # diacritics but the EasyOCR reading is what a folded query token may have
+    # actually matched, so dropping either can show text that does not
+    # contain the query that found it.
+    ocr_text: str | None = None
 
     @property
     def representative_frame(self) -> int:
@@ -93,6 +100,10 @@ def search(
     against the in-memory client, which registers a slot's IDF statistics only
     once a point uses it. All three are populated by the current manifest;
     narrow this argument when ingesting one that predates OCR or captions.
+
+    The engine also narrows it to drop `ocr` when the OCR boost is on, so that
+    on-screen text is counted once — as its own weighted channel — rather than
+    once here at RRF's fixed weight and again on top.
     """
     if sparse_query:
         prefetch = [
@@ -133,6 +144,40 @@ def search(
     return [_to_scored_frame(point) for point in response.points]
 
 
+def search_sparse(
+    client: QdrantClient,
+    collection_name: str,
+    sparse_query: SparseVector,
+    using: str = collections.SPARSE_OCR,
+    limit: int = DEFAULT_LIMIT,
+    query_filter: qmodels.Filter | None = None,
+) -> list[ScoredFrame]:
+    """Search one lexical slot on its own, with no dense branch at all.
+
+    `search` above always anchors on the image vector, which is right for a
+    query that describes a scene and wrong for one that quotes a caption or a
+    name. A ticker reading "Nguyễn Xuân Son" has no visual signature, so a
+    fused query still spends most of its result budget on frames that merely
+    look plausible. Querying the slot alone gives the whole budget to points
+    that actually contain the words.
+
+    Scores here are Qdrant's IDF-weighted lexical scores and are *not*
+    comparable with the cosine similarities `search` returns. Anything that
+    combines the two lists must fuse on rank — see `app/ranking/boost.py`.
+    """
+    response = client.query_points(
+        collection_name=collection_name,
+        query=qmodels.SparseVector(
+            indices=sparse_query.indices, values=sparse_query.values
+        ),
+        using=using,
+        limit=limit,
+        query_filter=query_filter,
+        with_payload=True,
+    )
+    return [_to_scored_frame(point) for point in response.points]
+
+
 def _to_scored_frame(point) -> ScoredFrame:
     payload = point.payload or {}
     return ScoredFrame(
@@ -145,7 +190,22 @@ def _to_scored_frame(point) -> ScoredFrame:
         path=payload.get("path"),
         start_sec=_optional_float(payload.get("start_sec")),
         end_sec=_optional_float(payload.get("end_sec")),
+        ocr_text=_joined_ocr(payload),
     )
+
+
+def _joined_ocr(payload: dict) -> str | None:
+    """Both readings of this point's on-screen text, VLM first.
+
+    `enrichment_payload` omits empty fields, so a point with neither reading
+    has neither key and reports None rather than an empty string.
+    """
+    parts = [
+        str(payload[key]).strip()
+        for key in ("ocr_text_vlm", "ocr_text")
+        if payload.get(key)
+    ]
+    return " · ".join(parts) if parts else None
 
 
 def _optional_int(value) -> int | None:

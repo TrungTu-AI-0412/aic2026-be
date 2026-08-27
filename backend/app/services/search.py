@@ -2,6 +2,7 @@ from typing import Protocol
 
 from app.schemas.search import (
     KisSearchRequest,
+    OcrSearchRequest,
     QaSearchRequest,
     SearchResponse,
     TrakeSearchRequest,
@@ -15,4 +16,7 @@ class SearchService(Protocol):
         ...
 
     async def search_trake(self, request: TrakeSearchRequest) -> SearchResponse:
+        ...
+
+    async def search_ocr(self, request: OcrSearchRequest) -> SearchResponse:
         ...
