@@ -4,6 +4,7 @@ from fastapi.testclient import TestClient
 
 from app.api.deps import get_search_service
 from app.api.endpoints import search as endpoint
+from app.retrieval.decompose import DecompositionUnavailableError
 from app.retrieval.engine import AsrOnlyRequestError, AsrOnlyUnavailableError
 
 
@@ -16,6 +17,20 @@ class FakeSearchService:
 
     async def search_qa(self, request):
         return self._result("qa")
+
+    async def decompose(self, request):
+        if self.error is not None:
+            raise self.error
+        return {
+            "source": "llm",
+            "overview": {"original": None, "vision": "a lantern festival",
+                         "speech": "lễ hội đèn lồng"},
+            "events": [
+                {"original": None, "vision": "lanterns being lit",
+                 "speech": "thắp đèn lồng"}
+            ],
+            "latency_ms": {"decompose": 900.0, "caption": 400.0},
+        }
 
     def _result(self, task: str):
         if self.error is not None:
@@ -137,3 +152,50 @@ def test_valid_query_with_no_asr_hits_is_an_empty_200() -> None:
     assert response.status_code == 200
     assert response.json()["results"] == []
     assert response.json()["effective_retrieval_mode"] == "asr_only"
+
+
+def test_decompose_returns_both_forms_for_review() -> None:
+    response = make_client().post(
+        "/api/v1/search/decompose",
+        json={"query": "Đoạn video mô tả lễ hội đèn lồng, sau đó thắp đèn"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["source"] == "llm"
+    assert body["overview"]["vision"] == "a lantern festival"
+    assert body["events"][0]["speech"] == "thắp đèn lồng"
+
+
+def test_a_decomposition_that_never_happened_is_a_503() -> None:
+    """No fallback here: the decomposition is the entire product of the call."""
+    response = make_client(
+        DecompositionUnavailableError("query decomposition failed")
+    ).post("/api/v1/search/decompose", json={"query": "một chuỗi sự kiện"})
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "query decomposition failed"
+
+
+def test_kis_rejects_events_without_an_overview() -> None:
+    response = make_client().post(
+        "/api/v1/search/kis",
+        json={"task": "kis", "description": "x", "events": ["sự kiện một"]},
+    )
+
+    assert response.status_code == 422
+
+
+def test_temporal_kis_rejects_asr_only_mode() -> None:
+    response = make_client().post(
+        "/api/v1/search/kis",
+        json={
+            "task": "kis",
+            "description": "x",
+            "overview": "tổng quan",
+            "events": ["sự kiện một"],
+            "retrieval_mode": "asr_only",
+        },
+    )
+
+    assert response.status_code == 422

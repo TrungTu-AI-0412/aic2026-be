@@ -9,6 +9,7 @@ from app.retrieval.rewrite import Rewrite
 from app.schemas.search import (
     KisSearchRequest,
     QaSearchRequest,
+    QueryForms,
     TrakeSearchRequest,
 )
 from app.vector_store.search import AsrSegment, ScoredFrame
@@ -370,6 +371,148 @@ class TestTrake:
         )
         assert tracks.search_trake(request, CONFIG).results[0].frame_ids == [10, 50]
 
+    def test_gap_penalty_prefers_the_tighter_sequence(self, fake_retrieve):
+        """Inside the hard window, closer events are the better answer.
+
+        Both videos score identically on every event and both chains sit well
+        inside `max_gap`, so before the penalty existed these tied and the order
+        fell out of dict insertion. The events of one query describe a single
+        continuous action, so 4 seconds apart beats 200.
+        """
+        responses = fake_retrieve.responses
+        responses["run"] = [
+            frame(0.6, video_id="L01_V001", frame_id=10, pts_sec=1.0),
+            frame(0.6, video_id="L01_V002", frame_id=10, pts_sec=1.0),
+        ]
+        responses["jump"] = [
+            frame(0.6, video_id="L01_V001", frame_id=90, pts_sec=201.0),
+            frame(0.6, video_id="L01_V002", frame_id=90, pts_sec=5.0),
+        ]
+
+        response = tracks.search_trake(self._request(["run", "jump"]), CONFIG)
+
+        assert [r.video_id for r in response.results] == ["L01_V002", "L01_V001"]
+
+    def test_gap_penalty_cannot_outvote_a_much_better_frame(self, fake_retrieve):
+        """The weight is small on purpose: it reorders near-ties, nothing more.
+
+        The spread video scores 0.3 higher per event, which no gap inside the
+        window can pay for at `TRAKE_GAP_WEIGHT`. A penalty that could flip this
+        would be picking frames on their timestamps rather than their content.
+        """
+        responses = fake_retrieve.responses
+        responses["run"] = [
+            frame(0.9, video_id="L01_V001", frame_id=10, pts_sec=1.0),
+            frame(0.6, video_id="L01_V002", frame_id=10, pts_sec=1.0),
+        ]
+        responses["jump"] = [
+            frame(0.9, video_id="L01_V001", frame_id=90, pts_sec=280.0),
+            frame(0.6, video_id="L01_V002", frame_id=90, pts_sec=2.0),
+        ]
+
+        response = tracks.search_trake(self._request(["run", "jump"]), CONFIG)
+
+        assert [r.video_id for r in response.results] == ["L01_V001", "L01_V002"]
+
+    def test_the_best_predecessor_accounts_for_the_gap(self, fake_retrieve):
+        """The edge cost has to be paid *before* the predecessor is chosen.
+
+        Candidate A scores higher than B for the first event, so picking the
+        best chain by score alone takes A. But the second event's only candidate
+        sits 5s after B and 105s after A, and that gap is charged to the chain:
+
+            A: 0.50 - 0.10 x penalty(105s) = 0.50 - 0.0817 = 0.4183
+            B: 0.48 - 0.10 x penalty(5s)   = 0.48 - 0.0314 = 0.4486
+
+        So B wins on the lower raw score. Choosing the predecessor first and
+        charging the gap afterwards turns the exact search into a greedy walk
+        and returns A - this is the regression test for that.
+        """
+        responses = fake_retrieve.responses
+        responses["run"] = [
+            frame(0.50, frame_id=10, pts_sec=0.0),
+            frame(0.48, frame_id=20, pts_sec=100.0),
+        ]
+        responses["jump"] = [frame(0.7, frame_id=30, pts_sec=105.0)]
+
+        result = tracks.search_trake(self._request(["run", "jump"]), CONFIG).results[0]
+
+        assert result.frame_ids == [20, 30]
+
+    def test_gap_penalty_is_off_without_timestamps(self, fake_retrieve):
+        """No timestamp is no information, so the score stays the plain mean.
+
+        Only clip-only points lack one. Reading absence as "close together"
+        would hand them the best possible penalty and let them outrank real
+        keyframes on a gap nobody measured.
+        """
+        responses = fake_retrieve.responses
+        responses["run"] = [frame(0.8, frame_id=10)]
+        responses["jump"] = [frame(0.6, frame_id=50)]
+
+        response = tracks.search_trake(self._request(["run", "jump"]), CONFIG)
+
+        assert response.results[0].score == pytest.approx(0.7)
+
+    def test_gap_weight_zero_restores_the_mean(self, fake_retrieve):
+        responses = fake_retrieve.responses
+        responses["run"] = [frame(0.8, frame_id=10, pts_sec=1.0)]
+        responses["jump"] = [frame(0.6, frame_id=50, pts_sec=200.0)]
+
+        request = TrakeSearchRequest(
+            task="trake", overview="a jump", events=["run", "jump"], gap_weight=0.0
+        )
+
+        assert tracks.search_trake(request, CONFIG).results[0].score == pytest.approx(
+            0.7
+        )
+
+    def test_gap_penalty_applies_when_the_hard_check_is_disabled(self, fake_retrieve):
+        """`max_gap_sec=0` drops the cutoff, not the preference for tightness.
+
+        An operator who disables the hard rule still wants closer events ranked
+        first - the penalty is the better version of the rule they turned off.
+        So it is normalised by the module constant, never by `max_gap_sec`,
+        which would also divide by zero here.
+        """
+        responses = fake_retrieve.responses
+        responses["run"] = [
+            frame(0.6, video_id="L01_V001", frame_id=10, pts_sec=1.0),
+            frame(0.6, video_id="L01_V002", frame_id=10, pts_sec=1.0),
+        ]
+        responses["jump"] = [
+            frame(0.6, video_id="L01_V001", frame_id=90, pts_sec=4000.0),
+            frame(0.6, video_id="L01_V002", frame_id=90, pts_sec=6.0),
+        ]
+
+        request = TrakeSearchRequest(
+            task="trake", overview="a jump", events=["run", "jump"], max_gap_sec=0.0
+        )
+        response = tracks.search_trake(request, CONFIG)
+
+        assert [r.video_id for r in response.results] == ["L01_V002", "L01_V001"]
+
+    def test_alternates_are_ranked_by_swap_cost(self, fake_retrieve):
+        """Alternates are offered in the order the ranker would pick them.
+
+        Frame 60 scores lower than frame 800 but sits seconds from the chosen
+        first event instead of four minutes away, so swapping it in costs less.
+        Listing 800 first would recommend the swap the sequence search itself
+        ranks worst.
+        """
+        responses = fake_retrieve.responses
+        responses["run"] = [frame(0.9, frame_id=10, pts_sec=1.0)]
+        responses["jump"] = [
+            frame(0.90, frame_id=900, pts_sec=250.0),
+            frame(0.62, frame_id=800, pts_sec=240.0),
+            frame(0.60, frame_id=60, pts_sec=4.0),
+        ]
+
+        result = tracks.search_trake(self._request(["run", "jump"]), CONFIG).results[0]
+
+        assert result.frame_ids == [10, 900]
+        assert [a.frame_id for a in result.events[1].alternates] == [60, 800]
+
     def test_two_events_in_one_shot_are_both_selectable(self, fake_retrieve):
         """Two moments a second apart share a shot, and must stay separable.
 
@@ -594,3 +737,211 @@ class TestRewriting:
         assert response.rewritten_queries is None
         assert response.cleaned_queries is None
         assert response.results[0].frame_ids == [10]
+
+
+class TestPreRewrittenForms:
+    """What `/search/decompose` produced is searched verbatim.
+
+    The review screen only means something if the operator's edit is what runs,
+    so a request carrying both forms must make no LLM call at all - and a
+    caption the model never returned must not cost the query its speech form.
+    """
+
+    def _forms(self, vision: str | None, speech: str) -> QueryForms:
+        return QueryForms(original=speech, vision=vision, speech=speech)
+
+    def test_supplied_forms_skip_rewriting_entirely(self, fake_retrieve, monkeypatch):
+        monkeypatch.setattr(
+            tracks,
+            "rewrite_queries",
+            lambda *args, **kwargs: pytest.fail("rewriting ran on a decomposed query"),
+        )
+        fake_retrieve.responses["EN run"] = [frame(0.9, frame_id=10)]
+        fake_retrieve.responses["EN jump"] = [frame(0.8, frame_id=50)]
+
+        response = tracks.search_trake(
+            TrakeSearchRequest(
+                task="trake",
+                overview=self._forms("EN overview", "VI overview"),
+                events=[self._forms("EN run", "VI run"), self._forms("EN jump", "VI jump")],
+                top_k=10,
+            ),
+            CONFIG,
+        )
+
+        assert fake_retrieve.calls == ["EN overview", "EN run", "EN jump"]
+        assert fake_retrieve.speech_calls[:3] == ["VI overview", "VI run", "VI jump"]
+        assert response.rewritten_queries == ["EN overview", "EN run", "EN jump"]
+        assert response.cleaned_queries == ["VI overview", "VI run", "VI jump"]
+
+    def test_a_missing_caption_searches_the_original_language(self, fake_retrieve):
+        fake_retrieve.responses["VI run"] = [frame(0.9, frame_id=10)]
+        fake_retrieve.responses["VI jump"] = [frame(0.8, frame_id=50)]
+
+        tracks.search_trake(
+            TrakeSearchRequest(
+                task="trake",
+                overview=self._forms(None, "VI overview"),
+                events=[self._forms(None, "VI run"), self._forms(None, "VI jump")],
+                top_k=10,
+            ),
+            CONFIG,
+        )
+
+        assert fake_retrieve.calls == ["VI overview", "VI run", "VI jump"]
+
+    def test_a_mixed_payload_is_rewritten_as_a_whole(self, fake_retrieve, monkeypatch):
+        """A payload the decompose screen did not produce gets the ordinary path."""
+        seen: list[list[str]] = []
+
+        def _rewrite(texts, config, timings):
+            seen.append(list(texts))
+            return None
+
+        monkeypatch.setattr(tracks, "rewrite_queries", _rewrite)
+        fake_retrieve.responses["VI run"] = [frame(0.9, frame_id=10)]
+
+        tracks.search_trake(
+            TrakeSearchRequest(
+                task="trake",
+                overview="VI overview",
+                events=[self._forms("EN run", "VI run")],
+                top_k=10,
+            ),
+            CONFIG,
+        )
+
+        assert seen == [["VI overview", "VI run"]]
+
+
+class TestStageAScores:
+    def _request(self, events: list[str], top_k: int = 10) -> TrakeSearchRequest:
+        return TrakeSearchRequest(
+            task="trake", overview="a jump", events=events, top_k=top_k
+        )
+
+    def test_the_parts_of_the_video_score_are_reported(self, fake_retrieve):
+        responses = fake_retrieve.responses
+        responses["a jump"] = [frame(0.5, frame_id=1)]
+        responses["run"] = [frame(0.9, shot_id=1, frame_id=10)]
+        responses["jump"] = [frame(0.7, shot_id=2, frame_id=50)]
+
+        response = tracks.search_trake(self._request(["run", "jump"]), CONFIG)
+
+        stage_a = response.results[0].stage_a
+        assert stage_a.rank == 1
+        assert stage_a.overview_score == 0.5
+        assert stage_a.event_scores == [0.9, 0.7]
+        # Composite is the overview plus the mean of the events, as stage A ranks.
+        assert stage_a.score == pytest.approx(0.5 + 0.8)
+
+    def test_an_event_the_video_never_matched_scores_zero(self, fake_retrieve):
+        responses = fake_retrieve.responses
+        responses["a jump"] = [frame(0.5, frame_id=1)]
+        responses["run"] = [frame(0.9, shot_id=1, frame_id=10)]
+        # "jump" is found nowhere globally, but is found inside the video.
+        fake_retrieve.per_video_responses = {
+            "run": responses["run"],
+            "jump": [frame(0.4, shot_id=2, frame_id=50)],
+        }
+
+        response = tracks.search_trake(self._request(["run", "jump"]), CONFIG)
+
+        assert response.results[0].stage_a.event_scores == [0.9, 0.0]
+
+    def test_supplied_video_ids_report_no_stage_a(self, fake_retrieve):
+        responses = fake_retrieve.responses
+        responses["run"] = [frame(0.9, shot_id=1, frame_id=10)]
+        responses["jump"] = [frame(0.8, shot_id=2, frame_id=50)]
+        request = TrakeSearchRequest(
+            task="trake",
+            overview="a jump",
+            events=["run", "jump"],
+            top_k=10,
+            video_ids=["L01_V001"],
+        )
+
+        response = tracks.search_trake(request, CONFIG)
+
+        # Stage A never ran, and 0.0 would read as "matched nothing".
+        assert response.results[0].stage_a is None
+
+    def test_the_candidate_pool_never_exceeds_the_rows_asked_for(self, fake_retrieve):
+        responses = fake_retrieve.responses
+        responses["a jump"] = [
+            frame(0.9 - index / 100, video_id=f"L01_V{index:03d}", frame_id=1)
+            for index in range(10)
+        ]
+        responses["run"] = list(responses["a jump"])
+        responses["jump"] = [
+            frame(0.5, video_id=f"L01_V{index:03d}", shot_id=2, frame_id=50)
+            for index in range(10)
+        ]
+
+        tracks.search_trake(self._request(["run", "jump"], top_k=3), CONFIG)
+
+        # Stage B is videos x events serial round trips, so a pool wider than
+        # the rows requested is work that could never produce a row.
+        assert [len(videos) for _, videos in fake_retrieve.per_video_calls] == [3, 3]
+
+
+class TestTemporalKis:
+    def _request(self, top_k: int = 10) -> KisSearchRequest:
+        return KisSearchRequest(
+            task="kis",
+            description="một người vệ sinh máy ảnh, tháo rời rồi lau ống kính",
+            overview="cleaning a camera",
+            events=["taking the camera apart", "wiping the lens"],
+            top_k=top_k,
+        )
+
+    def test_one_frame_is_reported_and_it_is_the_best_scoring_event(
+        self, fake_retrieve
+    ):
+        responses = fake_retrieve.responses
+        responses["cleaning a camera"] = [frame(0.4, frame_id=1)]
+        responses["taking the camera apart"] = [frame(0.6, shot_id=1, frame_id=10)]
+        responses["wiping the lens"] = [frame(0.95, shot_id=2, frame_id=50)]
+
+        response = tracks.search_kis(self._request(), CONFIG)
+
+        assert response.task == "kis"
+        assert response.results[0].frame_ids == [50]
+
+    def test_the_whole_sequence_is_still_reported_for_review(self, fake_retrieve):
+        responses = fake_retrieve.responses
+        responses["cleaning a camera"] = [frame(0.4, frame_id=1)]
+        responses["taking the camera apart"] = [frame(0.9, shot_id=1, frame_id=10)]
+        responses["wiping the lens"] = [frame(0.7, shot_id=2, frame_id=50)]
+
+        response = tracks.search_kis(self._request(), CONFIG)
+
+        assert response.results[0].frame_ids == [10]
+        assert [event.frame_id for event in response.results[0].events] == [10, 50]
+        assert response.results[0].stage_a.event_scores == [0.9, 0.7]
+
+    def test_every_event_votes_on_the_video(self, fake_retrieve):
+        """The point of the track: a moment the overview cannot find still counts."""
+        responses = fake_retrieve.responses
+        responses["cleaning a camera"] = [frame(0.3, video_id="L01_V002", frame_id=1)]
+        responses["taking the camera apart"] = [
+            frame(0.9, video_id="L01_V001", shot_id=1, frame_id=10)
+        ]
+        responses["wiping the lens"] = [
+            frame(0.9, video_id="L01_V001", shot_id=2, frame_id=50)
+        ]
+
+        response = tracks.search_kis(self._request(), CONFIG)
+
+        assert response.results[0].video_id == "L01_V001"
+
+    def test_a_plain_description_takes_the_direct_path(self, fake_retrieve):
+        fake_retrieve.responses["xe hơi đỏ"] = [frame(0.9, frame_id=10)]
+
+        response = tracks.search_kis(
+            KisSearchRequest(task="kis", description="xe hơi đỏ", top_k=10), CONFIG
+        )
+
+        assert fake_retrieve.per_video_calls == []
+        assert response.results[0].frame_ids == [10]
+        assert response.results[0].events is None
