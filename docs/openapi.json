@@ -143,6 +143,51 @@
         }
       }
     },
+    "/api/v1/search/decompose": {
+      "post": {
+        "tags": [
+          "Search"
+        ],
+        "summary": "Decompose",
+        "description": "Split one pasted query into the overview and events, for review.\n\nRetrieval does not run here. The operator reads what came back, fixes what\nthe model got wrong, and posts it to `/search/trake` or `/search/kis`,\nwhich then search those forms verbatim and make no LLM call of their own.",
+        "operationId": "decompose_api_v1_search_decompose_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DecomposeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DecomposeResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The query could not be decomposed"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/search/trake": {
       "post": {
         "tags": [
@@ -794,6 +839,66 @@
         ],
         "title": "CreateIngestionJobResponse"
       },
+      "DecomposeRequest": {
+        "properties": {
+          "query": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Query"
+          },
+          "max_events": {
+            "type": "integer",
+            "maximum": 12.0,
+            "minimum": 1.0,
+            "title": "Max Events",
+            "description": "Cap on events for a query that does not enumerate its own. Ignored when the query carries explicit `E1:` markers - those are split deterministically and the competition's own count is kept.",
+            "default": 6
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "query"
+        ],
+        "title": "DecomposeRequest"
+      },
+      "DecomposeResponse": {
+        "properties": {
+          "source": {
+            "type": "string",
+            "enum": [
+              "markers",
+              "llm"
+            ],
+            "title": "Source"
+          },
+          "overview": {
+            "$ref": "#/components/schemas/QueryForms"
+          },
+          "events": {
+            "items": {
+              "$ref": "#/components/schemas/QueryForms"
+            },
+            "type": "array",
+            "title": "Events"
+          },
+          "latency_ms": {
+            "additionalProperties": {
+              "type": "number"
+            },
+            "type": "object",
+            "title": "Latency Ms"
+          }
+        },
+        "type": "object",
+        "required": [
+          "source",
+          "overview",
+          "events"
+        ],
+        "title": "DecomposeResponse",
+        "description": "What the operator reviews before searching.\n\n`source` says how the split happened: `markers` when the query enumerated\nits events (a regex, no model, so it cannot renumber or merge them) and\n`llm` when they were inferred from prose."
+      },
       "EventCandidate": {
         "properties": {
           "frame_id": {
@@ -1266,6 +1371,33 @@
       },
       "KisSearchRequest": {
         "properties": {
+          "max_gap_sec": {
+            "anyOf": [
+              {
+                "type": "number",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Gap Sec",
+            "description": "Widest gap in seconds between consecutive events. 0 disables the check; None uses the configured default."
+          },
+          "gap_weight": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 1.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gap Weight",
+            "description": "What the time gap between consecutive events costs, as a share of the sequence score - the events of one query describe a single continuous action, so a tighter chain is the better answer. 0 disables the penalty; None uses the configured default."
+          },
           "asr_enabled": {
             "anyOf": [
               {
@@ -1345,7 +1477,8 @@
           "description": {
             "type": "string",
             "minLength": 1,
-            "title": "Description"
+            "title": "Description",
+            "description": "The query as typed. Ignored for retrieval when `events` is given, where the decomposed forms are searched instead."
           },
           "top_k": {
             "type": "integer",
@@ -1353,6 +1486,44 @@
             "minimum": 1.0,
             "title": "Top K",
             "default": 100
+          },
+          "overview": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "$ref": "#/components/schemas/QueryForms"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Overview",
+            "description": "Temporal KIS only. Must be given with `events`."
+          },
+          "events": {
+            "anyOf": [
+              {
+                "items": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "$ref": "#/components/schemas/QueryForms"
+                    }
+                  ]
+                },
+                "type": "array",
+                "minItems": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Events",
+            "description": "Temporal KIS only: the moments the description walks through, in order. Omit for an ordinary single-frame KIS search."
           }
         },
         "type": "object",
@@ -1360,7 +1531,8 @@
           "task",
           "description"
         ],
-        "title": "KisSearchRequest"
+        "title": "KisSearchRequest",
+        "description": "One frame per row, found either directly or through a sequence.\n\n`overview` and `events` turn this into a *temporal* KIS: a description that\nwalks through phases (\"ph\u00e2n c\u1ea3nh ti\u1ebfp theo...\") is decomposed by\n`/search/decompose`, each moment votes on the video independently, and the\nrow still reports one frame - the highest-scoring event of the aligned\nchain. Averaging those phases into a single 40-word caption is what this\nreplaces. The operator opts in; nothing is auto-detected."
       },
       "NeighbourFrame": {
         "properties": {
@@ -1529,6 +1701,43 @@
         "title": "QaSearchRequest",
         "description": "Same retrieval as KIS: find the moment, the operator reads it.\n\nThere is no `question` field. It was never encoded \u2014 SigLIP2 scores a\ncaption against an image and \"what colour is the bike?\" describes no\nimage \u2014 and no VQA model is wired in, so nothing downstream could use it.\nThe operator answers off the frame and types it into the submission."
       },
+      "QueryForms": {
+        "properties": {
+          "original": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Original"
+          },
+          "vision": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Vision"
+          },
+          "speech": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Speech"
+          }
+        },
+        "type": "object",
+        "required": [
+          "speech"
+        ],
+        "title": "QueryForms",
+        "description": "One part of a decomposed query, in the forms retrieval needs.\n\nProduced by `POST /search/decompose` and accepted back by the search\nendpoints, so an operator edits what the model wrote and the search uses it\nverbatim - a search given these does no LLM work at all.\n\n`original` is the span of the operator's query this was cut from, and is\nnull for an overview the model synthesised (the query never stated one).\n`vision` is null when the caption call failed: retrieval then puts `speech`\nthrough the image tower, which ranks worse than a caption but is not\nnothing."
+      },
       "SearchResponse": {
         "properties": {
           "request_id": {
@@ -1633,6 +1842,16 @@
             "type": "number",
             "title": "Score"
           },
+          "stage_a": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/StageAScore"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "events": {
             "anyOf": [
               {
@@ -1724,6 +1943,38 @@
         ],
         "title": "SearchVersions"
       },
+      "StageAScore": {
+        "properties": {
+          "rank": {
+            "type": "integer",
+            "title": "Rank"
+          },
+          "score": {
+            "type": "number",
+            "title": "Score"
+          },
+          "overview_score": {
+            "type": "number",
+            "title": "Overview Score"
+          },
+          "event_scores": {
+            "items": {
+              "type": "number"
+            },
+            "type": "array",
+            "title": "Event Scores"
+          }
+        },
+        "type": "object",
+        "required": [
+          "rank",
+          "score",
+          "overview_score",
+          "event_scores"
+        ],
+        "title": "StageAScore",
+        "description": "Why the video-selection stage kept this video.\n\nThe composite alone cannot answer the question an operator actually asks -\ndid this video win on the overview and lose every event, or the reverse -\nso the parts it is made of are reported next to it. `event_scores` is the\nbest global score each event reached in this video, 0.0 where the event\nreached it nowhere, in request order."
+      },
       "TimelineKeyframe": {
         "properties": {
           "frame_id": {
@@ -1795,6 +2046,33 @@
       },
       "TrakeSearchRequest": {
         "properties": {
+          "max_gap_sec": {
+            "anyOf": [
+              {
+                "type": "number",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Gap Sec",
+            "description": "Widest gap in seconds between consecutive events. 0 disables the check; None uses the configured default."
+          },
+          "gap_weight": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 1.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gap Weight",
+            "description": "What the time gap between consecutive events costs, as a share of the sequence score - the events of one query describe a single continuous action, so a tighter chain is the better answer. 0 disables the penalty; None uses the configured default."
+          },
           "asr_enabled": {
             "anyOf": [
               {
@@ -1855,13 +2133,26 @@
             "title": "Task"
           },
           "overview": {
-            "type": "string",
-            "minLength": 1,
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "$ref": "#/components/schemas/QueryForms"
+              }
+            ],
             "title": "Overview"
           },
           "events": {
             "items": {
-              "type": "string"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "$ref": "#/components/schemas/QueryForms"
+                }
+              ]
             },
             "type": "array",
             "minItems": 1,
@@ -1889,19 +2180,6 @@
             ],
             "title": "Video Ids",
             "description": "Search only these videos, skipping video selection entirely. For an operator who already found the video with a KIS query."
-          },
-          "max_gap_sec": {
-            "anyOf": [
-              {
-                "type": "number",
-                "minimum": 0.0
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Max Gap Sec",
-            "description": "Widest gap in seconds between consecutive events. 0 disables the check; None uses the configured default."
           }
         },
         "additionalProperties": false,

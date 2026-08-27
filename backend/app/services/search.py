@@ -1,6 +1,8 @@
 from typing import Protocol
 
 from app.schemas.search import (
+    DecomposeRequest,
+    DecomposeResponse,
     KisSearchRequest,
     QaSearchRequest,
     SearchResponse,
@@ -15,4 +17,7 @@ class SearchService(Protocol):
         ...
 
     async def search_trake(self, request: TrakeSearchRequest) -> SearchResponse:
+        ...
+
+    async def decompose(self, request: DecomposeRequest) -> DecomposeResponse:
         ...

@@ -1,12 +1,15 @@
 # TRAKE retrieval
 
 How `POST /search/trake` turns an overview plus N event descriptions into ranked
-frame sequences, and why each stage is shaped the way it is.
+frame sequences, and why each stage is shaped the way it is. `POST /search/kis`
+runs the same two stages when the operator gives it events, and reports one
+frame instead of the chain — see §11.
 
-Code: [`app/retrieval/tracks.py`](../backend/app/retrieval/tracks.py) (`search_trake`,
-`_candidate_videos`, `_best_increasing_sequence`),
+Code: [`app/retrieval/tracks.py`](../backend/app/retrieval/tracks.py)
+(`_temporal_search`, `_candidate_videos`, `_best_increasing_sequence`),
 [`app/retrieval/engine.py`](../backend/app/retrieval/engine.py)
 (`retrieve_video_scores`, `retrieve_per_video`),
+[`app/retrieval/decompose.py`](../backend/app/retrieval/decompose.py),
 [`app/retrieval/rewrite.py`](../backend/app/retrieval/rewrite.py).
 
 ---
@@ -42,8 +45,10 @@ top-N, which fine-grained events routinely do. So the path splits in two.
 
 ```mermaid
 flowchart TD
+    DEC["POST /search/decompose\nquery, max_events\n→ operator reviews and edits"]
     REQ["POST /search/trake\noverview, events[], top_k,\nvideo_ids?, max_gap_sec?"]
-    RW["rewrite_queries([overview, *events])\n2 concurrent prompts, 1 batch"]
+    RW["_query_forms([overview, *events])\nforms supplied → used verbatim, no LLM call\nplain strings → rewrite_queries, 2 concurrent prompts"]
+    DEC -.->|"{original, vision, speech} per part"| REQ
     REQ --> RW
     RW -->|"vision: EN caption ≤40w\nspeech: VI, narration deleted"| BR{"video_ids given?"}
 
@@ -56,7 +61,7 @@ flowchart TD
         A3["score(video) =\nbest_overview + mean_i(best_event_i)"]
         A1 --> A3
         A2 --> A3
-        A3 --> A4["top 100 videos"]
+        A3 --> A4["top min(100, top_k) videos\nparts kept → SearchResult.stage_a"]
     end
 
     VID --> B
@@ -70,10 +75,15 @@ flowchart TD
     B2 --> C["_best_increasing_sequence\nDP per video"]
     C --> D["drop videos with an empty slot\nor no valid ordering"]
     D --> E["sort by sequence score,\ncut to top_k"]
-    E --> F["SearchResult per video:\nframe_ids[] + events[] with alternates"]
+    E --> F["SearchResult per video:\nframe_ids[] + events[] with alternates\n+ stage_a (score, overview_score, event_scores)\nKIS: frame_ids = the best-scoring event only"]
 ```
 
 ## 4. Rewrite — one batch, two prompts
+
+Skipped entirely when the request carries `{vision, speech}` objects instead of
+strings: those came from `/search/decompose` and were reviewed by a human, so
+re-captioning them would throw the operator's edit away (§11). What follows is
+the path a request of plain strings takes.
 
 `[overview, *events]` goes out as **one numbered batch**, under **two prompts on two
 concurrent calls**:
@@ -101,7 +111,11 @@ last event is searched as half a sentence.
 ## 5. Stage A — candidate videos
 
 `_candidate_videos` searches the overview **and every event** globally, then reduces
-each to one score per video.
+each to one score per video. The composite and **the parts it is made of** are
+reported back on every result as `stage_a`: "won on the overview, lost every
+event" and its reverse score identically and mean opposite things to an operator
+deciding whether to trust a video. `stage_a` is null when `video_ids` was
+supplied, because the stage never ran and 0.0 would read as "matched nothing".
 
 ```
 score(video) = best_overview_hit(video) + (1/n) · Σ_i best_event_i_hit(video)
@@ -259,13 +273,22 @@ all candidates, one bonus pass over the flattened hits, then re-split per video.
 
 ## 7. Alignment — `_best_increasing_sequence`
 
-Per video, choose one candidate per event maximising the summed score, subject to two
-constraints:
+Per video, choose one candidate per event maximising
+
+```
+mean(event scores) − gap_weight · mean(gap penalty)
+```
+
+subject to two hard constraints:
 
 1. `representative_frame` **strictly increasing**
 2. `pts_sec` gap between consecutive picks ≤ `max_gap` (default 300s; `0` disables;
    skipped when either timestamp is missing, since a missing time is not evidence
    that the events are far apart)
+
+`_gap_sec` is the single source of truth for "do we know the gap"; both the hard
+cutoff and the penalty read `None` as *no information*, never as far apart or
+adjacent.
 
 ```mermaid
 flowchart LR
@@ -290,21 +313,65 @@ flowchart LR
     C1 -->|"unreachable"| X["dropped"]
 ```
 
-Chosen chain: `120 → 140 → 450`, score `(0.31+0.26+0.22)/3`. Division by the event
-count keeps sequences of different lengths on one scale.
+Chosen chain: `120 → 140 → 450`. With `pts_sec` of 4.0, 4.6 and 19.0 the two gaps are
+0.6s and 14.4s, so at `gap_weight = 0.05` the score is
 
-It is an **exact** DP, not a greedy walk: whether a candidate may follow another
-depends only on that other candidate, so "best total ending at candidate *j*" is a
-sufficient state. `max_gap` exists because the events of one TRAKE query describe a
-single continuous action — without it a chain spanning a 40-minute video scores
-exactly as well as one spanning three seconds.
+```
+(0.31+0.26+0.22)/3 − 0.05 · (0.082 + 0.479)/2  =  0.2633 − 0.0140  =  0.2493
+```
+
+Division by the event count keeps sequences of different lengths on one scale, and the
+per-edge weight is pre-scaled by `n/(n−1)` so `gap_weight` means the same thing at any
+event count — otherwise a weight tuned on two events would land 1.6× harder on five.
+
+### 7.1 Why the gap penalty is a soft term and not a tighter cutoff
+
+`max_gap` alone is binary: inside the window a 1-second gap and a 299-second gap
+scored identically, which is wrong for a query describing one continuous action. The
+penalty is `log1p(gap) / log1p(TRAKE_MAX_GAP_SEC)` — 0 at no gap, 1.0 at 300s, above 1
+beyond that with no clamp, since a bigger gap really is worse.
+
+Normalised by the **module constant**, never by the request's `max_gap_sec`: an
+operator who sets that to `0` has disabled the cutoff, not asked for spread events to
+rank as well as tight ones — the penalty is the better version of the rule they just
+turned off. It would also divide by zero.
+
+`log1p` is steepest near zero, so it separates small gaps sharply and large ones
+barely. With the cutoff that is the right division of labour: the cutoff rejects the
+absurd, the penalty ranks the plausible.
+
+At `gap_weight = 0.05` a 300s gap costs 0.05 against event scores of 0.15–0.35 — it
+reorders near-ties and cannot outvote a clearly better frame, the same posture the ASR
+bonus takes. `EventHit.score` stays the event's own similarity, **not** net of the
+penalty: the penalty belongs to the sequence, not to one pick.
+
+### 7.2 The DP stays exact, but the predecessor choice had to change
+
+The penalty puts a cost on the **edge** between two picks, so it must be charged
+*before* a predecessor is chosen. Taking the best-scoring chain and paying the gap
+afterwards is a greedy step and returns the wrong answer whenever a slightly worse
+predecessor sits closer in time:
+
+| event 1 candidate | score | frame | `pts_sec` | net of the edge to `f=30` |
+|---|---|---|---|---|
+| A | 0.50 | 10 | 0.0 | `0.50 − 0.10·0.817` = **0.418** |
+| B | 0.48 | 20 | 100.0 | `0.48 − 0.10·0.314` = **0.449** |
+
+B wins on the lower raw score. Folding the edge cost into the value being maximised
+keeps the search **exact**: feasibility *and* edge cost both look only at the previous
+candidate, which leaves "best total ending at candidate *j*" a sufficient state.
+Complexity is unchanged, `O(Σ |slotᵢ| × |slotᵢ₊₁|)`.
+
+`max_gap` still exists because the events of one TRAKE query describe a single
+continuous action — without it a chain spanning a 40-minute video is not rejected at
+all, only mildly penalised.
 
 Ordering is on the frame id, not `pts_sec`, because that is what a submission reports
 and it rises with time inside a video anyway. Seconds are used **only** for the gap,
 which is a duration and so cannot be expressed in frames when videos differ in frame
 rate.
 
-### 7.1 Alternates
+### 7.3 Alternates
 
 `_event_hits` reports, per event, the runners-up the pick beat — held to the *same*
 two rules against the **neighbouring picks**: after the previous event, before the
@@ -312,15 +379,24 @@ next, within the gap. Offering a candidate the ranker would have rejected would 
 an operator hand-assemble a sequence the system does not consider a sequence, and
 submit it out of order.
 
+They are also **ranked by what the swap would cost** — `score − gap_weight ·
+(penalty to the previous pick + penalty to the next)` — which is no longer score
+order once a gap carries a penalty. A slightly worse frame seconds from its
+neighbours beats a better one minutes away, and listing them by score would
+recommend the swap the sequence search itself ranks worst. Absent neighbours (the
+first and last events) contribute nothing.
+
 ## 8. The knobs
 
 | constant | value | what it buys | when to move it |
 |---|---|---|---|
-| `TRAKE_VIDEO_CANDIDATES` | 100 | width of the alignment pool; a submission ranks 100 lines and the track returns ≤1 result per candidate | the cost dial — stage B is `videos × events` serial round trips |
+| `TRAKE_VIDEO_CANDIDATES` | 100 | ceiling on the alignment pool; a submission ranks 100 lines and the track returns ≤1 result per candidate. The pool is `min(this, top_k)` — a result needs a candidate to live in, so aligning more videos than the operator asked for rows is work that cannot produce one | the cost dial — stage B is `videos × events` serial round trips |
+| `MAX_DECOMPOSED_EVENTS` | 6 | cap on events inferred from prose by `/search/decompose`; a query that enumerates its own (`E1:`) is not capped | raise only with the latency in §10 in mind — every event multiplies stage B |
 | `TRAKE_STAGE_A_TOP_K` | 1000 | frame pool per stage-A query; `overfetch_limit` lifts it to 5000 raw hits | recall of the video pool |
 | `TRAKE_CANDIDATES_PER_EVENT` | 20 | candidates per event **inside one video** | when the DP has no valid ordering but the event is visibly present |
 | `TRAKE_ALTERNATES_PER_EVENT` | 5 | runners-up offered to the operator | UI only, free |
 | `TRAKE_MAX_GAP_SEC` | 300.0 | widest gap between consecutive events | per request via `max_gap_sec`; `0` disables |
+| `TRAKE_GAP_WEIGHT` | 0.05 | what separation costs, as a share of the sequence score; also the normaliser for the penalty | per request via `gap_weight`; `0` disables. Raise if spread sequences still win; if candidate *videos* change, it is far too high — Stage A never sees it |
 | `STAGE_A_SPEECH_TOP_K` | 200 | speech segments matched in stage A | pinned deliberately, see §5.5 |
 | `asr_weight` | 0.3 | share of a frame's score speech can add | per request |
 | `DEFAULT_CLIP_WEIGHT` | 0.5 | clip index as tie-breaker and recall net, never an outvote | |
@@ -342,10 +418,86 @@ submit it out of order.
   sub-second moment is *bracketed*, not pinned. `events[].alternates` exists so an
   operator closes that gap by hand. Asking the VLM *where* inside a bracketed shot an
   event sits is the obvious next lever.
-- **No TRAKE eval set.** `data/eval_set.jsonl` is ASR-derived and has no TRAKE
-  queries, so changes here are checked by unit tests and by eye, not measured.
+- **Nothing here is fitted.** `TRAKE_GAP_WEIGHT = 0.05`, `TRAKE_MAX_GAP_SEC = 300`
+  and stage A's `best_overview + mean(best_event)` are all reasoned from the score
+  scale, not measured — and the mean is now taken over as many as six *inferred*
+  events against a *synthesised* overview (§11), which is a different input
+  distribution from the one they were reasoned for.
+  `data/evaluation_set_p1.csv` is where that gets settled: 24 queries, of which 3
+  are TRAKE with frame-level ground truth (`video_id` + the exact `frame_ids`, some
+  with several acceptable tuples) and 18 are KIS whose ground truth is a *set* of up
+  to 10 acceptable frames. It has not been run against this path yet.
+- **The gap penalty is most generous exactly where a degenerate sequence sits.**
+  `log1p` is steepest at gap→0, and Stage B deliberately does not collapse shots so
+  that two events *can* share one two-second shot. A chain where the same visual
+  matched all n events therefore lands in the cheapest region. If that shows up, the
+  fix is a floor below ~1s, not a different curve — there is nothing to fit one
+  against today.
 - **Rewrite timeout is flat** (`rewrite_timeout_sec = 6.0`), not `base + n × per_query`
   — a ten-event batch is output-token-bound and can outrun it. Marked `ponytail:` in
   `engine.py`.
 - **`retrieve_video_scores` is called `1 + n_events` times**, each pulling 5000 raw
   hits; stage A cost grows linearly with the event count.
+
+## 11. Decomposition and temporal KIS
+
+An operator pastes the task as the competition wrote it, `POST /search/decompose`
+splits it, and **the operator reads the split before anything is searched**. A
+wrong decomposition costs the whole task, and it is only visible if someone can
+see it next to the words it was cut from — which is why the search endpoints do
+not decompose for you.
+
+### 11.1 Two paths into the split
+
+| the query | how it splits | what the LLM does |
+|---|---|---|
+| enumerates its events (`E1:`, `E2:` …) | `split_markers`, a regex | captions only |
+| prose ("phân cảnh tiếp theo…") | one decomposition call, capped at `max_events` | splits, deletes narration, captions |
+
+Marker splitting is not just cheaper — it is the version that cannot renumber or
+merge. `query-p1-18-trake` in the eval set is numbered **E1, E2, E2, E4**; it has
+four events, and counting *marker lines* says so while trusting the numbers does
+not. The split also keeps the operator's words exactly, which is what the speech
+form wants anyway.
+
+### 11.2 Which call runs beside which
+
+Both paths end at one caption call over `[overview, *events]`, and it is **not**
+`rewrite.CAPTION_PROMPT`: that prompt captions each line alone, and
+`E2: Khoảnh khắc 4 chân hoàn toàn chạm đất` alone describes nothing. The event
+caption prompt sees the overview on line 1 and carries the scene's lasting detail
+— the lion, its colours, the floor — into every caption, because each one is
+searched alone against single frames.
+
+- **Markers**: the split is already done, so `CLEAN_PROMPT` (speech) runs *beside*
+  the caption call. Wall clock is the slower of the two.
+- **Prose**: the split *is* the deletion — each event is a span of the operator's
+  own words — so the decomposition call produces the speech form itself and the
+  caption call runs *after* it. Serial on purpose: two calls that each decompose
+  independently can return different counts and boundaries, and the two forms are
+  paired positionally, so event 3's caption would be searched against event 2's
+  speech. It costs a second on a screen where a human is reading.
+
+### 11.3 Failure is not uniform
+
+| what failed | result | why |
+|---|---|---|
+| prose decomposition | **503** | it is the entire product of the call; a 200 carrying a decomposition nobody performed is the failure you cannot see on a screen |
+| more events than `max_events` | **503** | the tail of these descriptions is where the distinguishing detail sits, so truncating is worse than asking again |
+| the caption call | **200**, `vision: null` | retrieval puts the original-language text through the image tower — worse than a caption, much better than nothing |
+| `CLEAN_PROMPT` (marker path) | **200**, speech as typed | deletion is an improvement, never a dependency |
+
+### 11.4 Temporal KIS
+
+`POST /search/kis` with `overview` + `events` runs everything above and reports
+**one frame**: the highest-scoring event of the aligned chain. Not the overview's
+frame — "cảnh trang trí bánh rán" is the least discriminative string in the query
+and exists to select the video. The alignment already puts every event in one
+compact, in-order run inside the chosen video, and KIS ground truth is a *set* of
+acceptable frames covering the described action, so all of them are in the window
+and the best-scoring one is the moment the model is surest it saw. The full chain
+still rides along in `events[]` for a one-click override.
+
+The operator opts in; nothing is auto-detected. What it buys is that a
+description walking through phases stops being averaged into a single 40-word
+caption — each moment votes on the video on its own.
