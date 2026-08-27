@@ -71,6 +71,14 @@ class FrameContext(BaseModel):
     duration_sec: float
     width: int
     height: int
+    youtube_id: str | None = Field(
+        default=None,
+        description=(
+            "YouTube id of the source upload, for previewing at `pts_sec` via an"
+            " embed instead of range-reading the local mp4. None when"
+            " `media-info/<video_id>.json` is missing a watch URL."
+        ),
+    )
     neighbours: list[NeighbourFrame]
 
 
@@ -98,4 +106,7 @@ class VideoTimeline(BaseModel):
     rotation: int
     is_vfr: bool
     codec: str
+    youtube_id: str | None = Field(
+        default=None, description="YouTube id of the source upload, or None."
+    )
     keyframes: list[TimelineKeyframe]

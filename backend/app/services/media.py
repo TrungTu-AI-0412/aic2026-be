@@ -1,3 +1,4 @@
+import json
 from asyncio import to_thread
 from bisect import bisect_left
 from dataclasses import dataclass
@@ -6,6 +7,7 @@ from functools import lru_cache
 from io import BytesIO
 from pathlib import Path
 from typing import Protocol
+from urllib.parse import parse_qs, urlparse
 
 import av
 import numpy as np
@@ -94,6 +96,26 @@ def _load_keyframe_table(manifest_path: str):
     if not Path(manifest_path).is_file():
         return None
     return pq.read_table(manifest_path, columns=list(KEYFRAME_COLUMNS))
+
+
+@lru_cache(maxsize=1024)
+def _youtube_id(media_info_dir: str, video_id: str) -> str | None:
+    """The YouTube id from the organiser's `media-info/<video_id>.json`.
+
+    Every source video is a YouTube download and the two run on the same clock
+    (`length` matches the probed duration to under a second across all 873),
+    so a client can preview `pts_sec` in an embed instead of range-reading a
+    ~100 MB local mp4. Missing file or missing `watch_url` returns None and
+    the client falls back to `/stream`.
+    """
+    path = Path(media_info_dir) / f"{video_id}.json"
+    if not path.is_file():
+        return None
+    try:
+        watch_url = json.loads(path.read_text(encoding="utf-8")).get("watch_url", "")
+    except (OSError, json.JSONDecodeError):
+        return None
+    return parse_qs(urlparse(watch_url).query).get("v", [None])[0]
 
 
 @lru_cache(maxsize=64)
@@ -221,6 +243,7 @@ class LocalMediaService:
         videos_manifest: str | None = None,
         keyframes_dir: str | None = None,
         frames_manifest: str | None = None,
+        media_info_dir: str | None = None,
     ) -> None:
         self._root = Path(data_root).resolve()
         self._keyframes = Path(keyframes_dir).resolve() if keyframes_dir else self._root / "keyframes"
@@ -230,6 +253,7 @@ class LocalMediaService:
         self._frames_manifest = str(
             frames_manifest or self._root / "manifests" / "frames.parquet"
         )
+        self._media_info = str(media_info_dir or self._root / "media-info")
 
     async def get_frame(self, video_id: str, frame_id: int) -> FrameImage:
         path = keyframe_path(self._keyframes, video_id, frame_id).resolve()
@@ -280,6 +304,7 @@ class LocalMediaService:
             rotation=video.rotation,
             is_vfr=video.is_vfr,
             codec=video.codec,
+            youtube_id=_youtube_id(self._media_info, video_id),
             keyframes=[
                 TimelineKeyframe(
                     frame_id=row[0],
@@ -351,6 +376,7 @@ class LocalMediaService:
             duration_sec=video.duration_sec,
             width=video.width,
             height=video.height,
+            youtube_id=_youtube_id(self._media_info, video_id),
             neighbours=[
                 NeighbourFrame(
                     frame_id=row[0],
