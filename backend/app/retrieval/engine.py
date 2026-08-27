@@ -11,9 +11,15 @@ from dataclasses import dataclass, field
 from app.features import sparse
 from app.features.multimodal import embed_text
 from app.features.sparse import SparseVector
-from app.ranking import dedupe, fusion, rerank
+from app.ranking import boost, dedupe, fusion, rerank
+from app.vector_store import collections
 from app.vector_store.client import get_qdrant_client
-from app.vector_store.search import ScoredFrame, build_filter, search
+from app.vector_store.search import (
+    ScoredFrame,
+    build_filter,
+    search,
+    search_sparse,
+)
 
 
 @dataclass
@@ -43,6 +49,12 @@ class RetrievalConfig:
     # have no sparse slots, and a prefetch against a vector the collection
     # does not declare fails the whole query rather than degrading.
     hybrid_enabled: bool = True
+    # Run on-screen text as its own weighted channel, fused onto the visual
+    # ranking by rank, instead of leaving it as one more equal branch inside
+    # Qdrant's RRF. Costs one extra sparse query per retrieve() call, which is
+    # cheap next to the dense branch but is per-event on TRAKE.
+    ocr_boost_enabled: bool = True
+    ocr_boost_weight: float = boost.DEFAULT_OCR_WEIGHT
 
 
 def encode_query(text: str, config: RetrievalConfig, timings: Timings) -> list[float]:
@@ -68,6 +80,46 @@ def encode_query_sparse(
     return encoded or None
 
 
+def fused_sparse_names(config: RetrievalConfig) -> tuple[str, ...]:
+    """Which lexical slots the dense query fuses in server-side.
+
+    When the OCR boost is on, `ocr` comes out: it is queried separately and
+    fused back with a weight the operator controls. Leaving it in as well
+    would count on-screen text twice, once at RRF's fixed weight and once
+    again at the configured one.
+    """
+    if config.ocr_boost_enabled:
+        return (collections.SPARSE_SPEECH, collections.SPARSE_CAPTION)
+    return collections.SPARSE_VECTOR_NAMES
+
+
+def search_ocr(
+    sparse_query: SparseVector,
+    top_k: int,
+    config: RetrievalConfig,
+    timings: Timings,
+    video_ids: list[str] | None = None,
+) -> list[ScoredFrame]:
+    """Search the frame index on on-screen text alone.
+
+    Frames only, never clips. A clip point knows a shot's frame range but not
+    which frame inside it carries the text, and the whole reason to search
+    on-screen text is that the operator wants the frame where it is legible.
+    """
+    started = time.perf_counter()
+    try:
+        return search_sparse(
+            get_qdrant_client(),
+            config.frames_collection,
+            sparse_query,
+            using=collections.SPARSE_OCR,
+            limit=dedupe.overfetch_limit(top_k),
+            query_filter=build_filter(video_ids=video_ids),
+        )
+    finally:
+        timings.record("ocr", started)
+
+
 def search_vector(
     vector: list[float],
     top_k: int,
@@ -76,7 +128,7 @@ def search_vector(
     video_ids: list[str] | None = None,
     sparse_query: SparseVector | None = None,
 ) -> list[ScoredFrame]:
-    """Search the frame index, fused with the clip index when one is set."""
+    """Search the frame index, fused with the clip index and the OCR channel."""
     started = time.perf_counter()
     try:
         client = get_qdrant_client()
@@ -89,23 +141,36 @@ def search_vector(
             limit=limit,
             query_filter=query_filter,
             sparse_query=sparse_query,
+            sparse_names=fused_sparse_names(config),
         )
-        if not config.clips_collection:
-            return frames
-        clips = search(
-            client,
-            config.clips_collection,
-            vector,
-            limit=limit,
-            query_filter=query_filter,
-            sparse_query=sparse_query,
+        clips = (
+            search(
+                client,
+                config.clips_collection,
+                vector,
+                limit=limit,
+                query_filter=query_filter,
+                sparse_query=sparse_query,
+                sparse_names=fused_sparse_names(config),
+            )
+            if config.clips_collection
+            else []
         )
     finally:
         timings.record("qdrant", started)
 
+    on_screen: list[ScoredFrame] = []
+    if sparse_query and config.ocr_boost_enabled:
+        on_screen = search_ocr(sparse_query, top_k, config, timings, video_ids)
+
     started = time.perf_counter()
     try:
-        return fusion.fuse_frames_and_clips(frames, clips, config.clip_weight)
+        fused = fusion.fuse_frames_and_clips(frames, clips, config.clip_weight)
+        if not on_screen:
+            return fused
+        return boost.reciprocal_rank_fuse(
+            fused, on_screen, config.ocr_boost_weight
+        )
     finally:
         timings.record("fuse", started)
 
@@ -145,3 +210,35 @@ def retrieve(
     sparse_query = encode_query_sparse(text, config)
     hits = search_vector(vector, top_k, config, timings, video_ids, sparse_query)
     return rank(hits, text, top_k, config, timings)
+
+
+def retrieve_by_ocr(
+    text: str,
+    top_k: int,
+    config: RetrievalConfig,
+    timings: Timings,
+    video_ids: list[str] | None = None,
+) -> list[ScoredFrame]:
+    """Return shots whose on-screen text matches, with no visual signal at all.
+
+    Neither the image encoder nor the reranker runs. Skipping the encoder is
+    the point - this path answers in milliseconds because it never touches a
+    transformer. Skipping the reranker is a correctness matter: BLIP ITM
+    scores how well an image *depicts* a caption, and it cannot read a ticker,
+    so letting it reorder these hits would demote exactly the frames the query
+    asked for in favour of ones that merely look like the words.
+
+    `fold_diacritics` is left on. The ingest folded too, and this corpus's OCR
+    fails almost exclusively on diacritics, so a query typed with correct
+    Vietnamese has to reach the damaged spelling to find anything.
+    """
+    sparse_query = sparse.encode(text)
+    if not sparse_query:
+        return []
+    hits = search_ocr(sparse_query, top_k, config, timings, video_ids)
+
+    started = time.perf_counter()
+    try:
+        return dedupe.dedupe_by_shot(hits, top_k)
+    finally:
+        timings.record("dedupe", started)

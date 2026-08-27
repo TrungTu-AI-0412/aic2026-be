@@ -138,6 +138,14 @@ def hybrid(client, collection_name):
         "Tam DUnG LuU Thong doi Voi Xe 3 BaNH",
         "",
     ]
+    # What the VLM read off the same frames. It gets the diacritics right
+    # where EasyOCR does not, so both readings feed the one `ocr` slot and
+    # both come back on the hit.
+    vlm_texts = [
+        "",
+        "TẠM DỪNG LƯU THÔNG ĐỐI VỚI XE 3 BÁNH",
+        "",
+    ]
     # Prose descriptions of the same frames. Frame 2's caption names something
     # neither its speech nor its ticker mentions, which is the case the caption
     # slot exists for.
@@ -151,8 +159,10 @@ def hybrid(client, collection_name):
     points = []
     for index, text in enumerate(texts):
         sparse_vectors = {collections.SPARSE_SPEECH: sparse.encode(text)}
-        if ocr_texts[index]:
-            sparse_vectors[collections.SPARSE_OCR] = sparse.encode(ocr_texts[index])
+        if ocr_texts[index] or vlm_texts[index]:
+            sparse_vectors[collections.SPARSE_OCR] = sparse.encode(
+                ocr_texts[index], vlm_texts[index]
+            )
         sparse_vectors[collections.SPARSE_CAPTION] = sparse.encode(captions[index])
         points.append(
             upsert.make_point(
@@ -165,7 +175,10 @@ def hybrid(client, collection_name):
                     "shot_id": index,
                     "original_frame_id": index,
                     "asr_text": text,
-                    "ocr_text": ocr_texts[index],
+                    # As `enrichment_payload` writes them: an empty reading is
+                    # left out of the payload entirely rather than stored as "".
+                    **({"ocr_text": ocr_texts[index]} if ocr_texts[index] else {}),
+                    **({"ocr_text_vlm": vlm_texts[index]} if vlm_texts[index] else {}),
                     "caption_vi": captions[index],
                 },
                 sparse_vectors=sparse_vectors,
@@ -293,6 +306,83 @@ class TestHybridSearch:
                 client, hybrid, _vector(0), limit=3, sparse_query=sparse.encode(query)
             )
             assert hits[0].original_frame_id == expected, query
+
+
+class TestOcrOnlySearch:
+    """`search_sparse` against the `ocr` slot, with no dense branch at all."""
+
+    def test_only_frames_carrying_the_words_come_back(self, client, hybrid):
+        """The fused query has to return `limit` hits and pads with whatever
+        the image index liked. This one returns nothing it cannot justify."""
+        hits = search.search_sparse(
+            client, hybrid, sparse.encode("tạm dừng lưu thông"), limit=3
+        )
+
+        assert [hit.original_frame_id for hit in hits] == [1]
+
+    def test_the_image_has_no_say(self, hybrid, client):
+        """Frame 0 is the dense-nearest point to `_vector(0)` and wins the
+        fused query outright; here it must not appear at all."""
+        hits = search.search_sparse(
+            client, hybrid, sparse.encode("xe 3 bánh trở lên"), limit=3
+        )
+
+        assert 0 not in [hit.original_frame_id for hit in hits]
+
+    def test_speech_does_not_leak_into_the_slot(self, client, hybrid):
+        """"Hezbollah" is said on frame 2 and printed nowhere. Matching it
+        here would mean the slots were pooled at ingest."""
+        assert (
+            search.search_sparse(
+                client, hybrid, sparse.encode("Israel Hezbollah"), limit=3
+            )
+            == []
+        )
+
+    def test_a_caption_does_not_leak_into_the_slot(self, client, hybrid):
+        assert (
+            search.search_sparse(
+                client, hybrid, sparse.encode("chim bồ câu quảng trường"), limit=3
+            )
+            == []
+        )
+
+    def test_diacritic_damaged_text_is_still_reachable(self, client, hybrid):
+        """The ticker was read as "SUT LUN"; the query is typed correctly."""
+        hits = search.search_sparse(
+            client, hybrid, sparse.encode("sụt lún"), limit=3
+        )
+
+        assert [hit.original_frame_id for hit in hits] == [0]
+
+    def test_both_readings_come_back_on_the_hit(self, client, hybrid):
+        """The VLM reading is correct Vietnamese and the EasyOCR one is what a
+        folded token may have matched. Showing only one can display text that
+        does not contain the query that found it."""
+        hits = search.search_sparse(
+            client, hybrid, sparse.encode("tạm dừng lưu thông"), limit=1
+        )
+
+        assert hits[0].ocr_text == (
+            "TẠM DỪNG LƯU THÔNG ĐỐI VỚI XE 3 BÁNH"
+            " · Tam DUnG LuU Thong doi Voi Xe 3 BaNH"
+        )
+
+    def test_a_frame_with_no_on_screen_text_reports_none(self, client, hybrid):
+        hits = search.search(client, hybrid, _vector(2), limit=3)
+
+        assert next(h for h in hits if h.original_frame_id == 2).ocr_text is None
+
+    def test_the_video_filter_still_applies(self, client, hybrid):
+        hits = search.search_sparse(
+            client,
+            hybrid,
+            sparse.encode("tạm dừng lưu thông"),
+            limit=3,
+            query_filter=search.build_filter(video_ids=["L09_V999"]),
+        )
+
+        assert hits == []
 
 
 class TestOptimizeCollection:

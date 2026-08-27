@@ -34,6 +34,23 @@ class Settings(BaseSettings):
     # fusion and searches frames only.
     CLIP_FUSION_WEIGHT: float = 0.5
 
+    # Fuse the lexical vectors into every query. Must be off for a collection
+    # ingested before they existed: prefetching a vector the collection does
+    # not declare fails the query outright rather than degrading.
+    HYBRID_ENABLED: bool = True
+
+    # Search on-screen text as its own channel and fuse it onto the visual
+    # ranking by rank. 0 weight, or the flag off, leaves `ocr` as one more
+    # equal branch inside Qdrant's own fusion. /search/ocr is unaffected
+    # either way - it never consults these.
+    #
+    # The weight is small because it was measured, not argued: on 300 queries
+    # every step above 0.05 cost accuracy, and the 0.5 this shipped with was
+    # worse than turning the channel off. `app/ranking/boost.py` carries the
+    # table and the caveat that the query set is speech-derived.
+    OCR_BOOST_ENABLED: bool = True
+    OCR_BOOST_WEIGHT: float = 0.05
+
     # Cross-encoder rerank of the head of each result list. It costs one
     # forward pass per candidate, so RERANK_TOP_N is the latency dial. The
     # weights must be in the local Hugging Face cache before the competition:

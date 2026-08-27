@@ -7,9 +7,15 @@ ranking applies to every track at once.
 
 from uuid import uuid4
 
-from app.retrieval.engine import RetrievalConfig, Timings, retrieve
+from app.retrieval.engine import (
+    RetrievalConfig,
+    Timings,
+    retrieve,
+    retrieve_by_ocr,
+)
 from app.schemas.search import (
     KisSearchRequest,
+    OcrSearchRequest,
     QaSearchRequest,
     SearchResponse,
     SearchResult,
@@ -26,16 +32,23 @@ def search_kis(request: KisSearchRequest, config: RetrievalConfig) -> SearchResp
     timings = Timings()
     hits = retrieve(request.description, request.top_k, config, timings)
 
-    results = [
-        SearchResult(
-            rank=rank,
-            video_id=hit.video_id,
-            frame_ids=[hit.representative_frame],
-            score=hit.score,
-        )
-        for rank, hit in enumerate(hits, start=1)
-    ]
-    return _response("kis", results, config, timings)
+    return _response("kis", _one_frame_each(hits), config, timings)
+
+
+def search_ocr(request: OcrSearchRequest, config: RetrievalConfig) -> SearchResponse:
+    """Rank shots by the text printed on them, ignoring the image entirely.
+
+    This is the companion to the boost the other tracks get: there, on-screen
+    text nudges a visual ranking; here it *is* the ranking. A query whose
+    whole content is a name or a headline has nothing for the image model to
+    work with, and fusing a dense branch in would spend most of the result
+    budget on frames that only look plausible.
+    """
+    timings = Timings()
+    hits = retrieve_by_ocr(
+        request.text, request.top_k, config, timings, request.video_ids
+    )
+    return _response("ocr", _one_frame_each(hits), config, timings)
 
 
 def search_qa(request: QaSearchRequest, config: RetrievalConfig) -> SearchResponse:
@@ -49,17 +62,21 @@ def search_qa(request: QaSearchRequest, config: RetrievalConfig) -> SearchRespon
     timings = Timings()
     hits = retrieve(request.description, request.top_k, config, timings)
 
-    results = [
+    return _response("qa", _one_frame_each(hits), config, timings)
+
+
+def _one_frame_each(hits: list[ScoredFrame]) -> list[SearchResult]:
+    """One result per hit, ranked. `answer` stays unset for every track."""
+    return [
         SearchResult(
             rank=rank,
             video_id=hit.video_id,
             frame_ids=[hit.representative_frame],
-            answer=None,
             score=hit.score,
+            ocr_text=hit.ocr_text,
         )
         for rank, hit in enumerate(hits, start=1)
     ]
-    return _response("qa", results, config, timings)
 
 
 def search_trake(request: TrakeSearchRequest, config: RetrievalConfig) -> SearchResponse:

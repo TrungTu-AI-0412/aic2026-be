@@ -44,6 +44,7 @@ def create_collection(
     vector_size: int,
     distance: qmodels.Distance = DEFAULT_DISTANCE,
     indexing_threshold: int | None = INDEXING_DISABLED,
+    on_disk_payload: bool = True,
 ) -> None:
     """Create a collection, by default with indexing deferred for bulk load.
 
@@ -52,6 +53,12 @@ def create_collection(
     The dense vector is named rather than anonymous, and the sparse slots use
     Qdrant's IDF modifier so lexical scoring is BM25-equivalent with the
     corpus statistics computed server-side.
+
+    Payload lives on disk. It is the enrichment text — a caption alone runs to
+    465 characters across 177k keyframes — and none of it is read until a
+    point has already been selected by a vector, so holding it in RAM buys
+    nothing and costs the memory the index actually needs. Filtering still
+    works: payload *indexes* stay in memory, only the stored values move.
     """
     optimizers_config = (
         None
@@ -72,6 +79,7 @@ def create_collection(
             for name in SPARSE_VECTOR_NAMES
         },
         optimizers_config=optimizers_config,
+        on_disk_payload=on_disk_payload,
     )
 
 

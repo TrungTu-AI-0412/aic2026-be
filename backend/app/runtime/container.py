@@ -34,6 +34,9 @@ async def build_container(settings: Settings) -> Container:
                 rerank_enabled=settings.RERANK_ENABLED,
                 rerank_top_n=settings.RERANK_TOP_N,
                 rerank_model=settings.RERANK_MODEL,
+                hybrid_enabled=settings.HYBRID_ENABLED,
+                ocr_boost_enabled=settings.OCR_BOOST_ENABLED,
+                ocr_boost_weight=settings.OCR_BOOST_WEIGHT,
             )
         ),
         ingestion_service=SqliteIngestionService(
