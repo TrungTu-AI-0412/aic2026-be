@@ -179,6 +179,11 @@ types.
 - Parquet manifests remain the rebuild/audit source of truth;
   `docs/data-pipeline.md` is the current state of that data — what is in
   each column, where it came from, and what is still missing.
+- `docs/collections.md` is the same for the *loaded* collections — vector
+  slots, payload, coverage, and which `FEATURE_PROFILE` each one needs. The
+  parquet in this repo and the ingested set sample keyframes differently, so
+  `keyframe_n` does not mean the same thing on both sides; that document is
+  where the distinction is written down.
 - Manifest paths are constrained to `INGESTION_DATA_ROOT`; keep that check.
 
 ## Review rules
