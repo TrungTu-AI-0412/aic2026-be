@@ -30,6 +30,11 @@ allowed to be, so every failure mode - box down, timeout, malformed output -
 falls back to the query as typed. The two halves fail independently: a caption
 that does not arrive does not cost the cleaned form, which is the whole point of
 splitting them. A rewrite is an improvement, never a dependency.
+
+`decompose.py` reuses `CLEAN_PROMPT` and `_call` from here for the query it
+splits into events, but not `CAPTION_PROMPT`: a decomposed event is searched
+alone against single frames, and captioning it alone loses the scene it belongs
+to. See that module for which of its calls run beside which.
 """
 
 import re
@@ -170,6 +175,7 @@ def _attempt(
             system,
             texts,
             max_tokens,
+            len(texts),
             config.rewrite_base_url,
             config.rewrite_model,
             config.rewrite_api_key,
@@ -184,6 +190,7 @@ def _call(
     system: str,
     texts: tuple[str, ...],
     max_tokens: int,
+    expected: int | None,
     base_url: str,
     model: str,
     api_key: str,
@@ -220,7 +227,7 @@ def _call(
     # operator had typed it that way.
     if finish_reason != "stop":
         raise ValueError(f"rewrite stopped on {finish_reason!r}, not a stop token")
-    return _parse(content, len(texts))
+    return _parse(content, expected)
 
 
 def _post(
@@ -239,12 +246,16 @@ def _post(
     return choice["message"]["content"], choice["finish_reason"]
 
 
-def _parse(content: str, expected: int) -> tuple[str, ...]:
+def _parse(content: str, expected: int | None) -> tuple[str, ...]:
     """The numbered lines of `content`, in index order.
 
     All or nothing: a partial parse would silently shift a TRAKE event onto the
     wrong query, which ranks worse than not rewriting at all. Anything short of
     every index from 1 to `expected` raises and this half falls back.
+
+    `expected=None` is for decomposition, where the count *is* the answer: any
+    contiguous run from 1 is accepted, but a gap in the numbering still raises,
+    because a missing line there means a dropped event.
     """
     # Belt and braces. The competition endpoint emits no reasoning block with
     # thinking disabled, but a different server or model would.
@@ -256,6 +267,7 @@ def _parse(content: str, expected: int) -> tuple[str, ...]:
         if match:
             found[int(match.group(1))] = match.group(2).strip().strip("\"'“”")
 
-    if sorted(found) != list(range(1, expected + 1)) or not all(found.values()):
-        raise ValueError(f"expected {expected} rewritten queries, got {sorted(found)}")
-    return tuple(found[index] for index in range(1, expected + 1))
+    count = len(found) if expected is None else expected
+    if not count or sorted(found) != list(range(1, count + 1)) or not all(found.values()):
+        raise ValueError(f"expected {count} rewritten queries, got {sorted(found)}")
+    return tuple(found[index] for index in range(1, count + 1))

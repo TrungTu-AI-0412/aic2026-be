@@ -4,10 +4,13 @@ from dataclasses import replace
 
 from starlette.concurrency import run_in_threadpool
 
+from app.retrieval import decompose as decompose_query
 from app.retrieval import tracks
-from app.retrieval.engine import RetrievalConfig
+from app.retrieval.engine import RetrievalConfig, Timings
 from app.schemas.search import (
     AsrOverrides,
+    DecomposeRequest,
+    DecomposeResponse,
     KisSearchRequest,
     QaSearchRequest,
     SearchResponse,
@@ -61,4 +64,14 @@ class QdrantSearchService:
     async def search_trake(self, request: TrakeSearchRequest) -> SearchResponse:
         return await run_in_threadpool(
             tracks.search_trake, request, self._resolve(request)
+        )
+
+    async def decompose(self, request: DecomposeRequest) -> DecomposeResponse:
+        """Split a pasted query for review. No retrieval, only the LLM calls."""
+        return await run_in_threadpool(
+            decompose_query.decompose,
+            request.query,
+            request.max_events,
+            self._config,
+            Timings(),
         )
