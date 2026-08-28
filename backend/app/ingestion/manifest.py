@@ -14,44 +14,45 @@ class VariableFrameRateError(ValueError):
     """Raised when a single frame rate cannot map frame indexes to time."""
 
 
-class EnrichmentFields(BaseModel):
+class VideoMetaFields(BaseModel):
+    """Per-video metadata, identical on every point from the same video.
+
+    Shared by every entity because it describes the source video rather than
+    what was indexed from it. `publish_date` and `keywords` are deliberately
+    absent: the date is a `dd/mm/yyyy` string that sorts wrong and filters
+    badly, and keywords only ever existed to pad a frame-level speech vector
+    that no longer exists.
+    """
+
+    title: str = ""
+    author: str = ""
+    channel_id: str = ""
+    watch_url: str = ""
+
+    def meta_payload(self) -> dict:
+        values = {
+            "title": self.title,
+            "author": self.author,
+            "channel_id": self.channel_id,
+            "watch_url": self.watch_url,
+        }
+        return {name: value for name, value in values.items() if value}
+
+
+class EnrichmentFields(VideoMetaFields):
     """Retrieval signals that are optional to the manifest contract.
 
-    These come from the organiser's own artefacts and from ASR, and every one
-    is optional so a manifest written before they existed still validates.
-    They stay out of the required Arrow schemas for the same reason.
+    These come from the organiser's own artefacts, and every one is optional so
+    a manifest written before they existed still validates. They stay out of
+    the required Arrow schemas for the same reason.
 
-    They are declared once and shared by frames and clips because a shot's
-    speech and entities describe the shot, not the entity type used to index
-    it.
+    ASR text is *not* here. Segment-level speech is its own entity and its own
+    collection, so a frame or clip payload no longer carries a pooled
+    transcript.
     """
 
     objects: list[str] = Field(default_factory=list)
     object_counts: dict[str, int] = Field(default_factory=dict)
-    asr_text: str = ""
-    asr_text_corrected: str = ""
-    asr_entities: list[str] = Field(default_factory=list)
-    # On-screen text, unioned over the shot. Held as recognised, including the
-    # all-caps undiacriticked forms the news ticker uses: `app.features.sparse`
-    # folds diacritics, so "Tam DUnG LuU Thong" still answers a query typed
-    # "tạm dừng lưu thông". Normalising here would throw away the original.
-    ocr_text: str = ""
-    ocr_regions: int = 0
-    # On-screen text a Vietnamese VLM quoted out of the frame. Kept beside
-    # `ocr_text` rather than replacing it: the VLM reads Vietnamese type far
-    # better, but the recogniser sometimes catches small print the VLM skips,
-    # and both feed the one `ocr` sparse vector.
-    ocr_text_vlm: str = ""
-    # Prose description of the frame. A paraphrase, not a transcription — it
-    # gets its own sparse vector so 465 characters of scene description cannot
-    # swamp a headline.
-    caption_vi: str = ""
-    title: str = ""
-    author: str = ""
-    channel_id: str = ""
-    publish_date: str = ""
-    keywords: list[str] = Field(default_factory=list)
-    watch_url: str = ""
 
     @field_validator("object_counts", mode="before")
     @classmethod
@@ -67,6 +68,13 @@ class EnrichmentFields(BaseModel):
             return dict(value)
         return value
 
+    # On-screen text, unioned over the shot. Held as recognised, including the
+    # all-caps undiacriticked forms the news ticker uses: `app.features.sparse`
+    # folds diacritics, so "Tam DUnG LuU Thong" still answers a query typed
+    # "tạm dừng lưu thông". Normalising here would throw away the original.
+    ocr_text: str = ""
+    ocr_regions: int = 0
+
     def enrichment_payload(self) -> dict:
         """Only the fields that carry something.
 
@@ -77,19 +85,9 @@ class EnrichmentFields(BaseModel):
         values = {
             "objects": self.objects,
             "object_counts": self.object_counts,
-            "asr_text": self.asr_text,
-            "asr_text_corrected": self.asr_text_corrected,
-            "asr_entities": self.asr_entities,
             "ocr_text": self.ocr_text,
             "ocr_regions": self.ocr_regions,
-            "ocr_text_vlm": self.ocr_text_vlm,
-            "caption_vi": self.caption_vi,
-            "title": self.title,
-            "author": self.author,
-            "channel_id": self.channel_id,
-            "publish_date": self.publish_date,
-            "keywords": self.keywords,
-            "watch_url": self.watch_url,
+            **self.meta_payload(),
         }
         return {name: value for name, value in values.items() if value}
 
@@ -99,11 +97,13 @@ class ManifestRow(EnrichmentFields):
 
     Subclasses decide how a row maps to a point id and a payload, so the
     ingestion pipeline never has to branch on the entity itself.
+
+    Only `video_id` is common. `shot_id` and `path` belong to the entities that
+    index a piece of *video*; an ASR segment has neither, and `path` is
+    declared non-empty so it cannot simply be left blank.
     """
 
     video_id: str = Field(min_length=1)
-    shot_id: int = Field(ge=0)
-    path: str = Field(min_length=1)
 
     def point_parts(self) -> tuple[str, ...]:
         raise NotImplementedError
@@ -112,7 +112,14 @@ class ManifestRow(EnrichmentFields):
         raise NotImplementedError
 
 
-class KeyframeManifestRow(ManifestRow):
+class ShotEntityRow(ManifestRow):
+    """A row that indexes part of a source video, located by shot."""
+
+    shot_id: int = Field(ge=0)
+    path: str = Field(min_length=1)
+
+
+class KeyframeManifestRow(ShotEntityRow):
     """One sampled keyframe.
 
     `keyframe_n` is the keyframe's 1-based position within its video and is
@@ -128,6 +135,11 @@ class KeyframeManifestRow(ManifestRow):
     keyframe_n: int = Field(ge=1)
     original_frame_id: int = Field(ge=0)
     pts_sec: float = Field(ge=0)
+    # The shot this keyframe was sampled from, in seconds. A keyframe on its own
+    # is an instant, but the ASR overlap bonus has to ask whether a *span* of
+    # speech covers it, and speech segments are far longer than one frame.
+    shot_start_sec: float = Field(default=0.0, ge=0)
+    shot_end_sec: float = Field(default=0.0, ge=0)
 
     def point_parts(self) -> tuple[str, ...]:
         return (self.video_id, f"kf{self.keyframe_n}")
@@ -139,12 +151,14 @@ class KeyframeManifestRow(ManifestRow):
             "keyframe_n": self.keyframe_n,
             "original_frame_id": self.original_frame_id,
             "pts_sec": self.pts_sec,
+            "shot_start_sec": self.shot_start_sec,
+            "shot_end_sec": self.shot_end_sec,
             "path": self.path,
             **self.enrichment_payload(),
         }
 
 
-class ClipManifestRow(ManifestRow):
+class ClipManifestRow(ShotEntityRow):
     """One shot detected by shot-boundary detection.
 
     `start_frame` and `end_frame` are source-video frame indexes and are
@@ -182,6 +196,74 @@ class ClipManifestRow(ManifestRow):
             "end_sec": self.end_sec,
             "path": self.path,
             **self.enrichment_payload(),
+        }
+
+
+class AsrSegmentManifestRow(ManifestRow, VideoMetaFields):
+    """One speech segment, the unit ASR actually produces.
+
+    A segment is a time range, not a frame, which is why speech gets its own
+    collection rather than being pooled onto the keyframes it happens to cover:
+    the two have no common key. Retrieval joins them back together on time.
+
+    Only the corrected transcript is kept. Across the 40 023 segments in this
+    corpus there is no row with raw text but no corrected text, so the raw
+    column adds no reachable segment, and BM25 lowercases and strips
+    punctuation anyway. The caveat to remember is that `text_corrected` is
+    fluent but not accurate — an LLM added punctuation and capitalisation
+    without fixing mishearings, so a wrong word now reads like a right one.
+
+    Entities are split by type rather than pooled into one list, so a query can
+    filter on a person without matching a location that shares the name.
+    """
+
+    segment: int = Field(ge=1)
+    start_sec: float = Field(ge=0)
+    end_sec: float = Field(ge=0)
+    # The true segment length. `start`/`end` in the source are rounded to whole
+    # seconds and disagree with this on 16% of rows, so anything needing real
+    # duration must use this column.
+    duration: float = Field(default=0.0, ge=0)
+    text_corrected: str = ""
+    speech_score: float = 0.0
+    asr_persons: list[str] = Field(default_factory=list)
+    asr_orgs: list[str] = Field(default_factory=list)
+    asr_locations: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _check_range(self) -> "AsrSegmentManifestRow":
+        if self.end_sec < self.start_sec:
+            raise ValueError(
+                f"end_sec {self.end_sec} precedes start_sec {self.start_sec}"
+            )
+        return self
+
+    def point_parts(self) -> tuple[str, ...]:
+        return (self.video_id, f"seg{self.segment}")
+
+    def entity_terms(self) -> list[str]:
+        """Every entity mention, for the lexical vector."""
+        return [*self.asr_persons, *self.asr_orgs, *self.asr_locations]
+
+    def payload(self) -> dict:
+        values = {
+            "video_id": self.video_id,
+            "segment": self.segment,
+            "start_sec": self.start_sec,
+            "end_sec": self.end_sec,
+            "duration": self.duration,
+            "text_corrected": self.text_corrected,
+            "speech_score": self.speech_score,
+            "asr_persons": self.asr_persons,
+            "asr_orgs": self.asr_orgs,
+            "asr_locations": self.asr_locations,
+            **self.meta_payload(),
+        }
+        # `start_sec` is legitimately 0.0 on the first segment of every video and
+        # has to survive, unlike an empty entity list that would index nothing.
+        keep = {"video_id", "segment", "start_sec", "end_sec"}
+        return {
+            name: value for name, value in values.items() if value or name in keep
         }
 
 
@@ -239,7 +321,28 @@ KEYFRAME_ARROW_SCHEMA = pa.schema(
         ("keyframe_n", pa.int32()),
         ("original_frame_id", pa.int64()),
         ("pts_sec", pa.float64()),
+        ("shot_start_sec", pa.float64()),
+        ("shot_end_sec", pa.float64()),
         ("path", pa.string()),
+    ]
+)
+
+ASR_SEGMENT_ARROW_SCHEMA = pa.schema(
+    [
+        ("video_id", pa.string()),
+        ("segment", pa.int32()),
+        ("start_sec", pa.float64()),
+        ("end_sec", pa.float64()),
+        ("duration", pa.float64()),
+        ("text_corrected", pa.string()),
+        ("speech_score", pa.float64()),
+        ("asr_persons", pa.list_(pa.string())),
+        ("asr_orgs", pa.list_(pa.string())),
+        ("asr_locations", pa.list_(pa.string())),
+        ("title", pa.string()),
+        ("author", pa.string()),
+        ("channel_id", pa.string()),
+        ("watch_url", pa.string()),
     ]
 )
 
@@ -274,11 +377,13 @@ VIDEO_ARROW_SCHEMA = pa.schema(
 ARROW_SCHEMAS: dict[IngestionEntity, pa.Schema] = {
     IngestionEntity.FRAMES: KEYFRAME_ARROW_SCHEMA,
     IngestionEntity.CLIPS: CLIP_ARROW_SCHEMA,
+    IngestionEntity.ASR_SEGMENTS: ASR_SEGMENT_ARROW_SCHEMA,
 }
 
 ROW_MODELS: dict[IngestionEntity, type[ManifestRow]] = {
     IngestionEntity.FRAMES: KeyframeManifestRow,
     IngestionEntity.CLIPS: ClipManifestRow,
+    IngestionEntity.ASR_SEGMENTS: AsrSegmentManifestRow,
 }
 
 REQUIRED_COLUMNS: dict[IngestionEntity, set[str]] = {
@@ -338,6 +443,19 @@ def write_rows(
     out = Path(out_path)
 
     if append and out.is_file():
+        # Appending across a schema change is refused rather than reconciled.
+        # `read_table(schema=...)` will happily back-fill a column the old file
+        # lacks with nulls, which passes `validate_columns` (the column exists)
+        # and only fails later when a row is parsed — i.e. after a multi-hour
+        # decode pass has already been paid for. A stale manifest is a new
+        # manifest, not something to merge into.
+        existing = set(pq.ParquetFile(out).schema_arrow.names)
+        missing = set(schema.names) - existing
+        if missing:
+            raise ValueError(
+                f"'{out}' predates this schema and is missing "
+                f"{sorted(missing)}; move it aside instead of resuming into it"
+            )
         table = pa.concat_tables([pq.read_table(out, schema=schema), table])
 
     out.parent.mkdir(parents=True, exist_ok=True)

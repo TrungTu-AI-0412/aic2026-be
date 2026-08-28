@@ -36,13 +36,22 @@ python -c "import json; from pathlib import Path; from app.main import create_ap
 Preprocessing CLIs (each writes a Parquet manifest; `--resume` is supported by
 probe and shot detection):
 
+All three video stages take `--workers` (default 3) and `--resume`, and flush
+their manifest periodically, so an interrupted run is re-entrant.
+
 ```bash
-python -m app.ingestion.video.probe --source DIR --out videos.parquet --resume
-python -m app.ingestion.video.shot_detect --videos-manifest videos.parquet --out clips.parquet --detector transnetv2 --resume
-python -m app.ingestion.video.sampling --videos-manifest videos.parquet --shots-manifest clips.parquet --output-dir keyframes/ --out frames.parquet
+python -m app.ingestion.video.probe --source DIR --out videos.parquet --workers 3 --resume
+python -m app.ingestion.video.shot_detect --videos-manifest videos.parquet --out clips.parquet --detector transnetv2 --workers 3 --resume
+python -m app.ingestion.video.sampling --videos-manifest videos.parquet --shots-manifest clips.parquet --output-dir keyframes/ --frames-per-shot 3 --out frames.parquet --workers 3 --resume
 python -m app.ingestion.batch_builder keyframes|shots ...   # import externally produced artifacts
 python -m app.ingestion.runner --job-id ing-xxxx            # normally spawned by the API
 python3 ../scripts/qdrant_snapshot.py create|restore ...    # collection hand-off between machines
+```
+
+Full rebuild from raw video, ~9 hours under tmux (see `docs/data-pipeline.md` §8):
+
+```bash
+./scripts/ingest_all.sh
 ```
 
 Repo-root tools for the AIC 2025 batch-1 dataset (run from the repo root, not
@@ -56,9 +65,14 @@ python scripts/build_frames_manifest.py --map-keyframes DIR --shots DIR \
     --out-frames frames.parquet --out-clips clips.parquet \
     --out-videos video_bounds.parquet
 python scripts/join_ocr.py --ocr data/ocr_raw/ocr   # fold OCR into both manifests
-python scripts/join_captions.py                   # fold Vietnamese VLM captions in
 python scripts/build_eval_set.py --limit 300      # candidate eval queries
+python scripts/build_asr_manifest.py --transcripts data/transcripts --out asr_segments.parquet
 ```
+
+`build_frames_manifest.py` needs `--map-keyframes` and the organiser's keyframe
+images. **Neither is on this machine**, so it cannot be run here: every path in
+the old `frames.parquet` points at a missing file. Rebuild from `data/videos`
+instead, via the three video CLIs above.
 
 Evaluation (`app/eval/`) scores a run of that set. `app.eval.runner` is the
 ablation harness — each flag disables one retrieval component and the summaries
@@ -90,45 +104,143 @@ implementations and where the active collection names are injected.
 
 `QdrantSearchService` wraps the whole synchronous path in `run_in_threadpool` —
 a transformer forward pass plus blocking Qdrant IO would otherwise stall the
-event loop. `engine.retrieve()` is the one shared path for every track:
+event loop.
+
+Ahead of the engine, an operator may first paste the task whole into
+`POST /search/decompose` (`app/retrieval/decompose.py`), which splits it into an
+overview and its events and hands both retrieval forms back **for review before
+anything is searched**: a wrong decomposition costs the whole task, and it is
+only visible next to the words it was cut from. A task that enumerates its own
+events (`E1:`, `E2:`) is split by regex, never by the model - one of the three
+TRAKE queries in `data/evaluation_set_p1.csv` is numbered `E1, E2, E2, E4`, so
+events are counted by marker line and never by the number inside it. Prose is
+split by one LLM call, capped at `MAX_DECOMPOSED_EVENTS`; over the cap is a 503,
+not a truncation, because the tail is where the distinguishing detail sits. Both
+paths end at a caption call that sees the overview on line 1, because an event
+searched alone against single frames needs the scene it belongs to. A failed
+decomposition is a **503** (it is the whole product of the call); a failed
+caption is a 200 with `vision: null`. The search endpoints then take those forms
+back verbatim and make **no LLM call at all**, so the operator's edit is what
+runs - see `docs/trake-retrieval.md` §11.
+
+Ahead of the engine, `rewrite.rewrite_queries` prepares every query of the
+request twice, because the two collections want opposite things from the same
+string. Two **separate prompts on two concurrent calls** to `VLM_BASE_URL`, not
+one call asking for both: merged, the caption rules bled into the deletion rules
+and the model variously deleted the subject of the query (`lễ hội đèn lồng`,
+`4 phi hành gia mặc áo đen`) or deleted nothing at all. Split, each call does
+its own job, and the wall clock is the slower of the two rather than their sum.
+
+- `Rewrite.vision` — an English **caption**, at most 40 words, for the SigLIP2
+  text tower and the BLIP reranker. Not a translation: they would score "hãy tìm
+  trong video" as part of the scene, and the text tower reads exactly **64
+  tokens** (~45 English words), so a literal translation of a 700-character KIS
+  description is silently cut in half — losing the tail, which is where the
+  distinguishing detail usually sits. 40 words is the budget matched to that
+  window; capping it lower threw away detail that discriminates, including the
+  camera angle, which *is* visible. The prompt keeps a stated shot type
+  (overhead, head-on, close-up) and is told never to invent one.
+- `Rewrite.speech` — the query in its original language with the narration
+  phrases **deleted**, for the transcripts. Not translated, because they are
+  Vietnamese and are matched by term overlap as well as densely, so English
+  would drop the lexical half to nothing; not left as typed either, because
+  `đoạn video mô tả`, `phân cảnh bắt đầu là`, `hãy tìm` are live BM25 terms
+  scoring against those transcripts. Deletion, never rewording: whatever
+  survives is word-for-word what the operator typed.
+
+`retrieve(text, ..., speech_text=)` is where the two part company. Both forms
+come out of one call, so this costs one round trip, not two. It is the only
+network hop the query path takes, so it is on a timeout that has to cover a
+whole TRAKE batch (measured 1.8s for an overview plus five events) and **every**
+failure — box down, timeout, a misnumbered line, a `finish_reason` other than
+`stop` — falls back to the query as typed. The two halves fail **independently**:
+a caption that does not arrive does not cost the cleaned form, which is the point
+of separate calls. `None` means both failed. The `finish_reason` check is
+load-bearing: a truncated reply still parses, because the early lines are
+intact, so without it the last query is searched as half a sentence.
+`SearchResponse.rewritten_queries` reports the English forms and
+`cleaned_queries` reports the speech forms; both are `None` when the step did
+not run. `docs/research/mervin.md` argues the whole step
+away in favour of a Vietnamese-native embedding model — the argument is against
+SigLIP2, not against translating for it.
+
+`engine.retrieve()` is the one shared path for every track:
 
 1. `encode_query` → `features.multimodal.embed_text` with the configured profile
 2. `search_vector` → frame collection, plus the clip collection when configured,
    over-fetched by `dedupe.DEFAULT_OVERFETCH`
 3. `fusion.fuse_frames_and_clips` → combines both lists on `(video_id, shot_id)`,
    imputing each list's worst observed score for one-sided shots
-4. `boost.reciprocal_rank_fuse` → folds in a second, OCR-only query
-5. `dedupe.dedupe_by_shot` → one hit per shot, since ~1 keyframe/sec means a
-   single shot produces many near-identical vectors
+4. `ranking.asr.apply_asr_bonus` → adds `asr_weight ×` the best-scoring speech
+   segment whose time range covers each frame. Before dedupe on purpose, so
+   speech decides *which* frame represents a shot as well as where it ranks.
+   Additive, never multiplicative: 22 of 873 videos have no transcript, so
+   silence is not evidence against a frame
+5. `dedupe.dedupe_by_shot` → one hit per shot, since several keyframes per shot
+   produce many near-identical vectors
 6. `rerank.rerank` → BLIP ITM cross-encoder over the top `RERANK_TOP_N`; the
    reranked head stays a block because ITM probabilities are not comparable
    with the cosine scores below it
 
-Step 4 exists because a lexical score and a cosine similarity have no shared
-scale, so the two are fused on *rank*, not magnitude. When `OCR_BOOST_ENABLED`
-is on, `engine.fused_sparse_names` drops `ocr` from the server-side prefetch and
-`search_sparse` queries that slot on its own — on-screen text must be counted
-once, at the configured weight, not once again inside Qdrant's RRF. Turning the
-flag off restores the plain three-slot hybrid. It costs one extra sparse query
-per `retrieve()`, which is per-event on TRAKE.
+`tracks.py` decides only *what* to encode and how to shape results. KIS/QA return
+one frame per hit; QA leaves `answer=None` (no VQA model is wired in). KIS given
+`overview` + `events` is **temporal KIS**: the two-stage TRAKE path reporting one
+frame - the highest-scoring event of the aligned chain, since KIS ground truth is
+a set of acceptable frames covering the whole action. The operator opts in;
+nothing is auto-detected.
 
-`OCR_BOOST_WEIGHT` defaults to **0.05**, and that number is measured rather
-than argued. It shipped at 0.5 on the reasoning that half strength would keep
+**TRAKE runs in two stages**, because "which video" and "where in it" are
+different questions. `_candidate_videos` searches the overview *and* every event
+globally and keeps the top `min(TRAKE_VIDEO_CANDIDATES, top_k)` videos - a result
+needs a candidate to live in - scoring each as
+`best overview hit + mean of best per-event hits` and reporting that score and
+its parts back as `SearchResult.stage_a`. Coverage is deliberately not
+required here: demanding a global hit for every event is what dropped correct
+videos, since a fine-grained event ("the moment all four feet touch the ground")
+does not reach a global top-N against 290k frames. That stage reads
+`engine.retrieve_video_scores`, not `retrieve`: collapsing per shot and cutting
+to a page is what a result list wants, and it named 28 videos for a 100-video
+pool, because dense hits pile up inside a few long videos (the top 5000 frames
+of one query name 277 of them). It also skips reranking, for the reason stage B
+does - ITM probabilities near 1.0 summed against cosine scores near 0.2 made the
+candidate pool whatever BLIP happened to see, and cost seconds per request. Then
+`engine.retrieve_per_video` searches each event again *inside* each candidate —
+one filtered query per (video, event), because one query over all of them
+returns the global top-N across them and starves a video that ranks low
+overall. That stage does not collapse shots and turns reranking off: two events
+can happen inside one two-second shot, and the cross-encoder head covers the
+top-N of a single global list, so per-video it would rescore an arbitrary slice.
+Finally `_best_increasing_sequence` picks, per video, the highest-scoring
+strictly frame-increasing selection covering every event, subject to
+`max_gap_sec` between consecutive events. Ordering is on `original_frame_id`
+(what a submission reports, and monotone with time within a video); `pts_sec` is
+used only for the gap, which is a duration and so cannot be expressed in frames
+across videos with different frame rates. The result carries `events[]` —
+per-event frame, shot, timestamp, score and the runners-up it beat, bounded by
+the neighbouring picks so a swap cannot produce an out-of-order submission.
+
+**On-screen text** (`app/ranking/boost.py`, `engine.retrieve_by_ocr`):
+
+`POST /search/ocr` is the `ocr` sparse slot queried on its own — no image
+encoder, no query rewriting, no reranker. BLIP ITM scores how well a caption
+describes a picture and a chyron is not what the picture is *of*, so reranking
+demotes exactly the frames the query asked for; and rewriting turns prose into
+a caption, which would destroy the one signal being searched. Every row carries
+`ocr_text`, both recognisers' readings joined, as the evidence for the hit.
+
+`OCR_BOOST_ENABLED` folds that same channel over the visual ranking as a second
+query, fused on **rank** rather than magnitude — a lexical score and a cosine
+similarity share no scale. It runs as its own query rather than a Qdrant
+prefetch so the weight is ours; if `ocr` is also listed in `frame_sparse_names`
+the text is counted twice, once at a weight nobody chose.
+
+`OCR_BOOST_WEIGHT` defaults to **0.05**, and that number is measured rather than
+argued. It shipped at 0.5 on the reasoning that half strength would keep
 on-screen text a tie-breaker; on 300 queries against the real index that was
 *worse than turning the channel off* (recall@1 0.140 vs 0.230). The curve is
-monotonic down to 0.05, where the channel is finally worth +22% relative
-recall@1 over leaving `ocr` inside Qdrant's fusion. `app/ranking/boost.py`
-carries the full table and the caveat that the query set is speech-derived, so
-a set written from on-screen text would likely prefer a higher weight.
-
-`tracks.py` decides only *what* to encode and how to shape results. KIS/QA return
-one frame per hit; QA leaves `answer=None` (no VQA model is wired in); TRAKE
-searches each event separately and picks, per video, the highest-scoring
-strictly frame-increasing selection covering every event. `POST /search/ocr` is
-the same OCR channel on its own — no image encoder and no reranker, because BLIP
-ITM cannot read a ticker and would demote exactly the frames the query asked
-for. Every result carries `ocr_text`, both recognisers' readings joined, as the
-evidence for the hit.
+monotonic down to 0.05. `app/ranking/boost.py` carries the full table and the
+caveat that the query set is speech-derived, so a set written from on-screen
+text would likely prefer a higher weight.
 
 **Ingestion path** (`app/ingestion/`):
 
@@ -156,9 +268,23 @@ rows that could never score, against the per-video frame bounds in
 `scripts/build_frames_manifest.frame_upper_bound`. A missing bounds file
 disables the check rather than failing the export.
 
+**Collections** are two, not one. A speech segment is a time *range* and a
+keyframe is an *instant*, so they share no key: `frames` holds `dense_video`
+(image) plus reserved `dense_text`/`ocr` slots, and `asr` holds `dense_text`
+(Qwen3-Embedding-0.6B) plus a populated `speech` sparse vector. Frames declare
+**no** `speech` slot — pooling ASR onto frames as well would score the same
+speech twice, once through Qdrant RRF and once through the overlap bonus. Every
+slot is declared at creation because Qdrant cannot add a vector to an existing
+collection, so a slot declared now is a re-upsert later instead of re-embedding
+293k points. While `ocr` is unpopulated, frame search is dense-only and
+`sparse_names` must stay empty: querying an empty slot raises.
+
 **Feature profiles** (`app/features/profiles.py`) are the contract that ties a
 collection to a query. `FEATURE_PROFILE` in `.env` must match the profile the
-active collection was ingested with — same model, same dimension, same space.
+active collection was ingested with — same model, same dimension, same space; a
+mismatch returns plausible nonsense rather than an error. `kind` separates image
+profiles from text ones, and the slot a job writes is sized from that job's own
+profile, so the same manifest can be ingested under two models and compared.
 Model runtimes are `lru_cache`d and auto-select cuda/mps/cpu with fp16/fp32.
 All vectors are L2-normalized (mean-pooled then re-normalized for clips), so
 cosine similarity is a dot product.
@@ -176,14 +302,19 @@ types.
   collection during competition mode.
 - This is a single-team competition tool, not a multi-user production
   system: do not add validation/snapshot/activation gating to ingestion.
+- Video decode stays single-threaded (`thread_type = "NONE"`); parallelise with
+  processes. PyAV's log callback takes the GIL from a decoder thread while the
+  main thread holds it inside `avcodec_free_context()` — a real deadlock, see
+  `app/features/media.py`. Processes are also faster here: 3 × 428 fps beats the
+  705 fps threaded decode measured.
 - Parquet manifests remain the rebuild/audit source of truth;
   `docs/data-pipeline.md` is the current state of that data — what is in
   each column, where it came from, and what is still missing.
 - `docs/collections.md` is the same for the *loaded* collections — vector
-  slots, payload, coverage, and which `FEATURE_PROFILE` each one needs. The
-  parquet in this repo and the ingested set sample keyframes differently, so
-  `keyframe_n` does not mean the same thing on both sides; that document is
-  where the distinction is written down.
+  slots, payload, coverage, and which `FEATURE_PROFILE` each one needs. It also
+  records the text tower's token budget per profile, which is what a query
+  rewriter has to respect: SigLIP2 reads 64 tokens and truncates the rest in
+  silence.
 - Manifest paths are constrained to `INGESTION_DATA_ROOT`; keep that check.
 
 ## Review rules
@@ -195,10 +326,28 @@ types.
 - Do not change API contracts silently; regenerate `docs/openapi.json` when they
   change. The frontend (`../aic2026-fe`) codegens from it and is a separate
   repository — never mix backend and frontend changes in one commit.
-- `AGENTS.md` is a copy of this file; keep the two in sync.
+- `AGENTS.md` is **not** a copy of this file - it is a longer document with its
+  own task-contract sections. Apply the same change to both; never overwrite one
+  with the other.
 
 ## Known gaps
 
+- Ingestion has no resume: a failed upsert re-embeds from row 0, and the
+  collection is created unconditionally so a retry over an existing one raises.
+  The three video stages *do* resume, per video.
+
 - `batch_builder.scan_clips` raises `NotImplementedError` pending a clip file
   naming convention.
+- TRAKE event localisation is only as fine as the keyframes: three per shot, so
+  a sub-second moment is bracketed, not pinned. `events[].alternates` exists so
+  an operator closes that last gap by hand. The VLM endpoint in `.env` is now
+  read, but only to rewrite queries; asking it *where* an event is inside a
+  bracketed shot is the obvious next lever.
+- Nothing in TRAKE is fitted. `data/evaluation_set_p1.csv` (24 queries: 18 KIS,
+  3 TRAKE with frame-level ground truth, 3 QA) has never been run against this
+  path, so stage A's `overview + mean(events)`, `TRAKE_MAX_GAP_SEC` and
+  `TRAKE_GAP_WEIGHT` are reasoned from the score scale, not measured - and
+  decomposition now feeds them inferred events and synthesised overviews, which
+  is a different input distribution. `data/eval_set.jsonl` is a separate,
+  ASR-derived set and is absent.
 - `docs/architecture.md` is empty.

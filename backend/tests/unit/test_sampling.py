@@ -58,6 +58,37 @@ class TestPlanTargets:
         assert len(targets) == 1
         assert 10 <= targets[0] <= 11
 
+    def test_frames_per_shot_fixes_the_count_regardless_of_duration(self):
+        """A fixed count decouples keyframes from how long a shot runs.
+
+        The per-second rate gives a 1s shot one frame and a 40s shot forty; a
+        fixed 3 covers both the same way and makes the corpus total predictable
+        before the run.
+        """
+        short = sampling.plan_targets(shot(0, 24), fps=25.0, frames_per_shot=3)
+        long = sampling.plan_targets(shot(0, 999), fps=25.0, frames_per_shot=3)
+
+        assert len(short) == 3
+        assert len(long) == 3
+
+    def test_frames_per_shot_overrides_the_per_second_rate(self):
+        targets = sampling.plan_targets(
+            shot(0, 99), fps=25.0, frames_per_second=10.0, frames_per_shot=2
+        )
+
+        assert len(targets) == 2
+
+    def test_frames_per_shot_is_clamped_to_the_usable_frames(self):
+        """A two-frame shot yields two keyframes, not the three requested.
+
+        Distinct frames are the ceiling: asking for more would repeat a frame
+        index and, since identity is `(video_id, keyframe_n)`, quietly index the
+        same image twice.
+        """
+        targets = sampling.plan_targets(shot(10, 11), fps=25.0, frames_per_shot=3)
+
+        assert targets == [10, 11]
+
     def test_targets_avoid_the_shot_edges(self):
         targets = sampling.plan_targets(shot(0, 99), fps=25.0, boundary_inset=0.1)
 
@@ -330,4 +361,8 @@ class TestBuildKeyframeManifest:
             on_progress=lambda video_id, count: seen.append((video_id, count)),
         )
 
-        assert seen == [("L01_V001", 4), ("L01_V002", 2)]
+        # Sorted, not positional: videos are sampled in worker processes and
+        # progress fires as each finishes. Reporting a video the moment it lands
+        # is the point of the callback, so completion order is correct here and
+        # only the set of (video, count) pairs is the contract.
+        assert sorted(seen) == [("L01_V001", 4), ("L01_V002", 2)]

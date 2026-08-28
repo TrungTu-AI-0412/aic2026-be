@@ -8,18 +8,35 @@ assemble the final answer; they never re-implement the search itself.
 import time
 from dataclasses import dataclass, field
 
-from app.features import sparse
+from app.features import sparse, text as text_features
 from app.features.multimodal import embed_text
 from app.features.sparse import SparseVector
-from app.ranking import boost, dedupe, fusion, rerank
+from app.ranking import asr, boost, dedupe, fusion, rerank
 from app.vector_store import collections
 from app.vector_store.client import get_qdrant_client
 from app.vector_store.search import (
+    AsrSegment,
     ScoredFrame,
     build_filter,
     search,
+    search_asr,
     search_sparse,
+    scroll_frames_for_asr_segments,
 )
+
+
+class AsrOnlyRequestError(ValueError):
+    """The resolved request cannot run an ASR-only search."""
+
+
+class AsrOnlyUnavailableError(RuntimeError):
+    """The collections needed by an explicit ASR-only search are unavailable."""
+
+
+@dataclass(frozen=True)
+class AsrOnlyHit:
+    frame: ScoredFrame
+    segment: AsrSegment
 
 
 @dataclass
@@ -49,12 +66,43 @@ class RetrievalConfig:
     # have no sparse slots, and a prefetch against a vector the collection
     # does not declare fails the whole query rather than degrading.
     hybrid_enabled: bool = True
-    # Run on-screen text as its own weighted channel, fused onto the visual
-    # ranking by rank, instead of leaving it as one more equal branch inside
-    # Qdrant's RRF. Costs one extra sparse query per retrieve() call, which is
-    # cheap next to the dense branch but is per-event on TRAKE.
-    ocr_boost_enabled: bool = True
+    sparse_method: str = "bm25"
+    splade_model: str | None = None
+    # Lexical slots the frame collection actually populates. Empty by default
+    # because querying a declared-but-unfilled slot raises rather than degrading;
+    # becomes ("ocr",) once on-screen text is upserted.
+    frame_sparse_names: tuple[str, ...] = ()
+
+    # On-screen text as a boost over the visual ranking, queried on its own and
+    # folded in on rank. Separate from `frame_sparse_names` on purpose: a slot
+    # listed there is fused by Qdrant server-side, at a weight nobody here
+    # chooses, and counting the same text twice is worse than counting it once
+    # well. When this is on, `ocr` must be left out of `frame_sparse_names`.
+    ocr_boost_enabled: bool = False
     ocr_boost_weight: float = boost.DEFAULT_OCR_WEIGHT
+
+    # Speech overlap. A query also searches the segment collection, and each
+    # frame gains a share of the best-scoring segment that covers it in time.
+    # Unset collection or zero weight disables the stage outright.
+    asr_collection: str | None = None
+    asr_enabled: bool = True
+    asr_profile: str = "qwen3-embed-0.6b-v1"
+    asr_weight: float = asr.DEFAULT_WEIGHT
+    asr_dense_weight: float = asr.DEFAULT_DENSE_WEIGHT
+    asr_sparse_weight: float = asr.DEFAULT_SPARSE_WEIGHT
+    asr_pad_sec: float = asr.DEFAULT_PAD_SEC
+
+    # Query rewriting: one LLM call returns each query translated for the image
+    # space and stripped of the operator's phrasing for the speech stage. No base
+    # URL leaves the step a no-op, so a config that never heard of it - every
+    # test below - is unchanged.
+    rewrite_enabled: bool = True
+    rewrite_base_url: str | None = None
+    rewrite_model: str = ""
+    rewrite_api_key: str = ""
+    # ponytail: flat, not scaled per query. The step is output-token-bound, so a
+    # ten-event TRAKE batch would want `base + n × per_query` instead.
+    rewrite_timeout_sec: float = 6.0
 
 
 def encode_query(text: str, config: RetrievalConfig, timings: Timings) -> list[float]:
@@ -70,54 +118,16 @@ def encode_query_sparse(
 ) -> SparseVector | None:
     """Lexical form of the query, or None when hybrid search is off.
 
-    Not timed as its own stage: tokenising a query string is microseconds
-    against a transformer forward pass, and a timing entry that always reads
-    0.0 is noise in every response.
+    Not timed as its own stage for BM25: tokenising a query string is microseconds
+    against a transformer forward pass.
     """
     if not config.hybrid_enabled:
         return None
-    encoded = sparse.encode(text)
+    kwargs = {}
+    if config.splade_model:
+        kwargs["model_id"] = config.splade_model
+    encoded = sparse.encode(text, method=config.sparse_method, **kwargs)
     return encoded or None
-
-
-def fused_sparse_names(config: RetrievalConfig) -> tuple[str, ...]:
-    """Which lexical slots the dense query fuses in server-side.
-
-    When the OCR boost is on, `ocr` comes out: it is queried separately and
-    fused back with a weight the operator controls. Leaving it in as well
-    would count on-screen text twice, once at RRF's fixed weight and once
-    again at the configured one.
-    """
-    if config.ocr_boost_enabled:
-        return (collections.SPARSE_SPEECH, collections.SPARSE_CAPTION)
-    return collections.SPARSE_VECTOR_NAMES
-
-
-def search_ocr(
-    sparse_query: SparseVector,
-    top_k: int,
-    config: RetrievalConfig,
-    timings: Timings,
-    video_ids: list[str] | None = None,
-) -> list[ScoredFrame]:
-    """Search the frame index on on-screen text alone.
-
-    Frames only, never clips. A clip point knows a shot's frame range but not
-    which frame inside it carries the text, and the whole reason to search
-    on-screen text is that the operator wants the frame where it is legible.
-    """
-    started = time.perf_counter()
-    try:
-        return search_sparse(
-            get_qdrant_client(),
-            config.frames_collection,
-            sparse_query,
-            using=collections.SPARSE_OCR,
-            limit=dedupe.overfetch_limit(top_k),
-            query_filter=build_filter(video_ids=video_ids),
-        )
-    finally:
-        timings.record("ocr", started)
 
 
 def search_vector(
@@ -128,7 +138,7 @@ def search_vector(
     video_ids: list[str] | None = None,
     sparse_query: SparseVector | None = None,
 ) -> list[ScoredFrame]:
-    """Search the frame index, fused with the clip index and the OCR channel."""
+    """Search the frame index, fused with the clip index when one is set."""
     started = time.perf_counter()
     try:
         client = get_qdrant_client()
@@ -141,38 +151,190 @@ def search_vector(
             limit=limit,
             query_filter=query_filter,
             sparse_query=sparse_query,
-            sparse_names=fused_sparse_names(config),
+            sparse_names=config.frame_sparse_names,
         )
-        clips = (
-            search(
-                client,
-                config.clips_collection,
-                vector,
-                limit=limit,
-                query_filter=query_filter,
-                sparse_query=sparse_query,
-                sparse_names=fused_sparse_names(config),
-            )
-            if config.clips_collection
-            else []
+        if not config.clips_collection:
+            return frames
+        clips = search(
+            client,
+            config.clips_collection,
+            vector,
+            limit=limit,
+            query_filter=query_filter,
+            sparse_query=sparse_query,
+            sparse_names=config.frame_sparse_names,
         )
     finally:
         timings.record("qdrant", started)
 
-    on_screen: list[ScoredFrame] = []
-    if sparse_query and config.ocr_boost_enabled:
-        on_screen = search_ocr(sparse_query, top_k, config, timings, video_ids)
+    started = time.perf_counter()
+    try:
+        return fusion.fuse_frames_and_clips(frames, clips, config.clip_weight)
+    finally:
+        timings.record("fuse", started)
+
+
+def search_speech(
+    text: str,
+    top_k: int,
+    config: RetrievalConfig,
+    timings: Timings,
+    video_ids: list[str] | None = None,
+) -> list[AsrSegment]:
+    """Retrieve speech segments matching the query, dense and lexical fused.
+
+    Returns an empty list when the stage is off or unconfigured, so the caller
+    can treat "no speech collection" and "no matching speech" identically.
+    """
+    if not config.asr_enabled or not config.asr_collection:
+        return []
 
     started = time.perf_counter()
     try:
-        fused = fusion.fuse_frames_and_clips(frames, clips, config.clip_weight)
-        if not on_screen:
-            return fused
-        return boost.reciprocal_rank_fuse(
-            fused, on_screen, config.ocr_boost_weight
+        dense = (
+            text_features.embed_query(config.asr_profile, text)
+            if config.asr_dense_weight > 0
+            else None
+        )
+        lexical = (
+            encode_query_sparse(text, config)
+            if config.asr_sparse_weight > 0
+            else None
+        )
+        if dense is None and lexical is None:
+            return []
+
+        dense_hits, sparse_hits = search_asr(
+            get_qdrant_client(),
+            config.asr_collection,
+            dense,
+            lexical,
+            limit=dedupe.overfetch_limit(top_k),
+            query_filter=build_filter(video_ids=video_ids),
+        )
+        return asr.fuse_asr(
+            dense_hits,
+            sparse_hits,
+            config.asr_dense_weight,
+            config.asr_sparse_weight,
         )
     finally:
-        timings.record("fuse", started)
+        timings.record("asr", started)
+
+
+def map_asr_segments_to_frames(
+    segments: list[AsrSegment], frames: list[ScoredFrame], top_k: int
+) -> list[AsrOnlyHit]:
+    """Choose the sampled keyframe nearest each segment midpoint.
+
+    The vector-store filter already restricts frames to overlapping shots, but
+    the overlap is repeated here so the pure mapping remains correct in tests
+    and if a broader batch filter is introduced later.
+    """
+    by_video: dict[str, list[ScoredFrame]] = {}
+    for frame in frames:
+        if frame.pts_sec is None or frame.original_frame_id is None:
+            continue
+        by_video.setdefault(frame.video_id, []).append(frame)
+
+    best_by_shot: dict[tuple[str, int], AsrOnlyHit] = {}
+    for segment in segments:
+        midpoint = (segment.start_sec + segment.end_sec) / 2.0
+        candidates = []
+        for frame in by_video.get(segment.video_id, []):
+            window = frame.time_window()
+            if window is None:
+                continue
+            low, high = window
+            if low <= segment.end_sec and high >= segment.start_sec:
+                candidates.append(frame)
+        if not candidates:
+            continue
+
+        chosen = min(
+            candidates,
+            key=lambda frame: (
+                abs((frame.pts_sec or 0.0) - midpoint),
+                frame.representative_frame,
+            ),
+        )
+        hit = AsrOnlyHit(frame=chosen, segment=segment)
+        key = (chosen.video_id, chosen.shot_id)
+        current = best_by_shot.get(key)
+        if current is None or (
+            segment.score,
+            -segment.segment,
+            -chosen.representative_frame,
+        ) > (
+            current.segment.score,
+            -current.segment.segment,
+            -current.frame.representative_frame,
+        ):
+            best_by_shot[key] = hit
+
+    ranked = sorted(
+        best_by_shot.values(),
+        key=lambda hit: (
+            -hit.segment.score,
+            hit.frame.video_id,
+            hit.segment.segment,
+            hit.frame.representative_frame,
+        ),
+    )
+    return ranked[:top_k]
+
+
+def search_asr_only(
+    text: str,
+    top_k: int,
+    config: RetrievalConfig,
+    timings: Timings,
+) -> list[AsrOnlyHit]:
+    """Search speech globally and map its time ranges to submit-ready frames."""
+    if not config.asr_collection or not config.asr_enabled:
+        raise AsrOnlyUnavailableError("ASR-only retrieval is not configured")
+    if config.asr_dense_weight <= 0 and config.asr_sparse_weight <= 0:
+        raise AsrOnlyRequestError(
+            "ASR-only retrieval needs a dense or lexical branch"
+        )
+
+    client = get_qdrant_client()
+    try:
+        if not client.collection_exists(config.asr_collection):
+            raise AsrOnlyUnavailableError(
+                f"ASR collection '{config.asr_collection}' is unavailable"
+            )
+        if not client.collection_exists(config.frames_collection):
+            raise AsrOnlyUnavailableError(
+                f"frame collection '{config.frames_collection}' is unavailable"
+            )
+        segments = search_speech(text, top_k, config, timings)
+    except (AsrOnlyRequestError, AsrOnlyUnavailableError):
+        raise
+    except Exception as exc:
+        raise AsrOnlyUnavailableError(f"ASR search unavailable: {exc}") from exc
+
+    if not segments:
+        return []
+
+    started = time.perf_counter()
+    try:
+        frames = scroll_frames_for_asr_segments(
+            client, config.frames_collection, segments
+        )
+        hits = map_asr_segments_to_frames(segments, frames, top_k)
+    except Exception as exc:
+        raise AsrOnlyUnavailableError(
+            f"ASR frame mapping unavailable: {exc}"
+        ) from exc
+    finally:
+        timings.record("asr_frame_map", started)
+
+    if not hits:
+        raise AsrOnlyUnavailableError(
+            "ASR hits could not be mapped to temporal frame payloads"
+        )
+    return hits
 
 
 def rank(
@@ -198,18 +360,101 @@ def rank(
         timings.record("rerank", started)
 
 
-def retrieve(
+def retrieve_per_video(
     text: str,
+    video_ids: list[str],
+    limit: int,
+    config: RetrievalConfig,
+    timings: Timings,
+    speech_text: str | None = None,
+) -> dict[str, list[ScoredFrame]]:
+    """Top `limit` hits for `text` inside each of `video_ids`, keyed by video.
+
+    One encode, then one filtered query per video. A single query filtered to
+    all the videos at once would return the global top-N *across* them, which
+    starves a correct video that ranks low overall - the same recall failure
+    the caller's two-stage split exists to fix, one level down.
+
+    Shots are deliberately not collapsed. `dedupe_by_shot` keeps one frame per
+    shot, and two events of a TRAKE query can happen inside one two-second
+    shot, so collapsing would make that sequence unrepresentable rather than
+    merely rank it worse.
+
+    `speech_text` overrides the text the speech stage searches with; see
+    `retrieve`.
+    """
+    if not video_ids:
+        return {}
+
+    vector = encode_query(text, config, timings)
+    sparse_query = encode_query_sparse(text, config)
+
+    per_video = {
+        video_id: search_vector(
+            vector, limit, config, timings, [video_id], sparse_query
+        )
+        for video_id in video_ids
+    }
+
+    # One speech query for the whole candidate set, and one bonus pass over the
+    # flattened hits. `apply_asr_bonus` min-max normalises the segments it is
+    # given, so boosting each video from its own segment list would make the
+    # bonuses incomparable between videos - exactly what ranking them needs.
+    segments = (
+        search_speech(speech_text or text, limit, config, timings, video_ids)
+        if config.asr_weight > 0
+        else []
+    )
+    if segments:
+        started = time.perf_counter()
+        try:
+            boosted = asr.apply_asr_bonus(
+                [hit for hits in per_video.values() for hit in hits],
+                segments,
+                config.asr_weight,
+                config.asr_pad_sec,
+            )
+        finally:
+            timings.record("asr_bonus", started)
+        per_video = {video_id: [] for video_id in video_ids}
+        for hit in boosted:
+            if hit.video_id in per_video:
+                per_video[hit.video_id].append(hit)
+
+    return {
+        video_id: sorted(hits, key=lambda hit: hit.score, reverse=True)[:limit]
+        for video_id, hits in per_video.items()
+    }
+
+
+# Segments the video-selection stage matches against. Deliberately not scaled
+# with the frame pool that stage asks for: frame hits need a wide net because
+# they cluster inside a few long videos, while segments are spread across nearly
+# every video already - 700 of 873 in a top-1000 list, measured - so widening it
+# only cost about a second per query for a bonus that reorders near-ties.
+STAGE_A_SPEECH_TOP_K = 200
+
+
+def search_ocr_channel(
+    sparse_query: SparseVector,
     top_k: int,
     config: RetrievalConfig,
     timings: Timings,
     video_ids: list[str] | None = None,
 ) -> list[ScoredFrame]:
-    """Encode one text query and return deduplicated, reranked hits."""
-    vector = encode_query(text, config, timings)
-    sparse_query = encode_query_sparse(text, config)
-    hits = search_vector(vector, top_k, config, timings, video_ids, sparse_query)
-    return rank(hits, text, top_k, config, timings)
+    """The `ocr` slot on its own, over-fetched like any other frame search."""
+    started = time.perf_counter()
+    try:
+        return search_sparse(
+            get_qdrant_client(),
+            config.frames_collection,
+            sparse_query,
+            using=collections.SPARSE_OCR,
+            limit=dedupe.overfetch_limit(top_k),
+            query_filter=build_filter(video_ids=video_ids),
+        )
+    finally:
+        timings.record("ocr", started)
 
 
 def retrieve_by_ocr(
@@ -219,26 +464,134 @@ def retrieve_by_ocr(
     timings: Timings,
     video_ids: list[str] | None = None,
 ) -> list[ScoredFrame]:
-    """Return shots whose on-screen text matches, with no visual signal at all.
+    """On-screen text alone: no image encoder, and no reranker.
 
-    Neither the image encoder nor the reranker runs. Skipping the encoder is
-    the point - this path answers in milliseconds because it never touches a
-    transformer. Skipping the reranker is a correctness matter: BLIP ITM
-    scores how well an image *depicts* a caption, and it cannot read a ticker,
-    so letting it reorder these hits would demote exactly the frames the query
-    asked for in favour of ones that merely look like the words.
-
-    `fold_diacritics` is left on. The ingest folded too, and this corpus's OCR
-    fails almost exclusively on diacritics, so a query typed with correct
-    Vietnamese has to reach the damaged spelling to find anything.
+    The reranker is left out deliberately rather than forgotten. BLIP ITM
+    scores how well a caption describes a picture; a scoreboard or a chyron is
+    not what the picture is *of*, so putting these hits through it demotes
+    exactly the frames the query asked for.
     """
-    sparse_query = sparse.encode(text)
+    # Encoded directly rather than through `encode_query_sparse`, which returns
+    # None when `hybrid_enabled` is off. That flag governs whether the *dense*
+    # path fuses a lexical prefetch; it has no bearing on a search that is
+    # lexical from end to end, and honouring it here would make this endpoint
+    # return nothing at all with no explanation.
+    kwargs = {"model_id": config.splade_model} if config.splade_model else {}
+    sparse_query = sparse.encode(text, method=config.sparse_method, **kwargs)
     if not sparse_query:
         return []
-    hits = search_ocr(sparse_query, top_k, config, timings, video_ids)
+    hits = search_ocr_channel(sparse_query, top_k, config, timings, video_ids)
+    return dedupe.dedupe_by_shot(hits, top_k)
 
-    started = time.perf_counter()
-    try:
-        return dedupe.dedupe_by_shot(hits, top_k)
-    finally:
-        timings.record("dedupe", started)
+
+def _search_and_boost(
+    text: str,
+    top_k: int,
+    config: RetrievalConfig,
+    timings: Timings,
+    video_ids: list[str] | None = None,
+    speech_text: str | None = None,
+    speech_top_k: int | None = None,
+) -> list[ScoredFrame]:
+    """Everything up to ranking: encode, search both spaces, join on time."""
+    vector = encode_query(text, config, timings)
+    # Frame-side lexical search follows `text`, not `speech_text`. Inert today -
+    # `frame_sparse_names` is empty - but when OCR is populated this should
+    # switch, since on-screen text is Vietnamese too.
+    sparse_query = encode_query_sparse(text, config)
+    hits = search_vector(vector, top_k, config, timings, video_ids, sparse_query)
+
+    # Rank fusion, not a weighted sum: a lexical score and a cosine similarity
+    # have no shared scale, so only their orderings can be combined. Runs as a
+    # second query rather than a Qdrant prefetch so the weight is ours — see
+    # `ranking/boost.py` for why that weight is 0.05 and not the 0.5 it shipped
+    # as.
+    if config.ocr_boost_enabled and sparse_query is not None:
+        lexical = search_ocr_channel(
+            sparse_query, top_k, config, timings, video_ids
+        )
+        hits = boost.reciprocal_rank_fuse(
+            hits, lexical, weight=config.ocr_boost_weight
+        )
+
+    # Before dedupe on purpose. The bonus is applied per frame, and dedupe keeps
+    # the best frame per shot, so boosting first lets speech decide *which*
+    # frame represents a shot as well as where that shot ranks.
+    segments = (
+        search_speech(
+            speech_text or text,
+            speech_top_k or top_k,
+            config,
+            timings,
+            video_ids,
+        )
+        if config.asr_weight > 0
+        else []
+    )
+    if segments:
+        started = time.perf_counter()
+        try:
+            hits = asr.apply_asr_bonus(
+                hits, segments, config.asr_weight, config.asr_pad_sec
+            )
+        finally:
+            timings.record("asr_bonus", started)
+
+    return hits
+
+
+def retrieve(
+    text: str,
+    top_k: int,
+    config: RetrievalConfig,
+    timings: Timings,
+    video_ids: list[str] | None = None,
+    speech_text: str | None = None,
+) -> list[ScoredFrame]:
+    """Encode one text query and return deduplicated, reranked hits.
+
+    `speech_text` is the form of the query the speech stage should see, when it
+    differs from the one the image space should. Rewriting produces both: `text`
+    is translated for SigLIP2 and the reranker, `speech_text` is the original
+    language with the operator's phrasing stripped, because the transcripts are
+    Vietnamese but "hãy tìm trong video" is not something anyone said in one.
+    Defaults to `text`.
+    """
+    hits = _search_and_boost(text, top_k, config, timings, video_ids, speech_text)
+    return rank(hits, text, top_k, config, timings)
+
+
+def retrieve_video_scores(
+    text: str,
+    top_k: int,
+    config: RetrievalConfig,
+    timings: Timings,
+    speech_text: str | None = None,
+) -> dict[str, float]:
+    """Each video's best score for one query, over as wide a pool as it can get.
+
+    Choosing a *video* is not the same job as showing a page of results, so it
+    does not want the same tail. `retrieve` collapses hits per shot and then
+    truncates to `top_k` shots, and a query whose best frames sit inside a
+    handful of long videos then names almost no videos at all: the top 400
+    shots of "close-up of a white lion head" come from 28 videos - for a
+    100-video candidate pool. Nothing is collapsed or truncated here.
+
+    Reranking is off for the same reason it is off inside a chosen video: ITM
+    probabilities run to 1.0 where cosine scores sit near 0.2, so the head of
+    each query's list would outweigh every other video by scale alone, and
+    picking candidate videos would come down to whichever ones BLIP happened to
+    see. It also cost measured seconds per request to do it.
+    """
+    best: dict[str, float] = {}
+    for hit in _search_and_boost(
+        text,
+        top_k,
+        config,
+        timings,
+        speech_text=speech_text,
+        speech_top_k=STAGE_A_SPEECH_TOP_K,
+    ):
+        if hit.score > best.get(hit.video_id, float("-inf")):
+            best[hit.video_id] = hit.score
+    return best

@@ -189,7 +189,7 @@ def load_transcript_spans(path: Path) -> list[tuple[float, float, str]]:
 
 
 def load_asr_csv(path: Path) -> list[tuple[float, float, str, str, list[str]]]:
-    """Read one `<video_id>_segments_enriched.csv` from the external ASR set.
+    """Read one `<video_id>_segments_enriched.csv` from the zzzlazy/aic-asr set.
 
     Returns (start, end, text, text_corrected, entities). Unlike YouTube caption
     windows these spans do not overlap, so `end` is trustworthy and no trimming
@@ -450,7 +450,7 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         help=(
             "directory of <video_id>_segments_enriched.csv "
-            "(external ASR set, Apache-2.0); preferred over --transcripts"
+            "(zzzlazy/aic-asr, Apache-2.0); preferred over --transcripts"
         ),
     )
     parser.add_argument(

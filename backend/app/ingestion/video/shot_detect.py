@@ -25,10 +25,14 @@ import av
 import numpy as np
 from tqdm import tqdm
 
+from functools import partial
+
+from app.ingestion.video import parallel
 from app.ingestion.manifest import (
     CLIP_ARROW_SCHEMA,
     ClipManifestRow,
     VideoManifestRow,
+    count_rows,
     existing_video_ids,
     iter_video_rows,
     write_rows,
@@ -54,6 +58,11 @@ DEFAULT_THRESHOLDS = {
 # Shots shorter than this are treated as flicker rather than content. Roughly
 # half a second at 25-30fps.
 DEFAULT_MIN_SHOT_FRAMES = 15
+
+# Rows buffered before the manifest is rewritten. Parquet cannot be extended in
+# place, so each flush rewrites the file; at ~100 shots per video this trades a
+# rewrite every few videos for never losing more than that to a crash.
+DEFAULT_FLUSH_ROWS = 2000
 
 # Frames are compared at a fixed small size. Aspect ratio is deliberately not
 # preserved: the distortion is identical on every frame, so it cancels out of
@@ -183,6 +192,8 @@ def build_shot_manifest(
     on_progress=None,
     resume: bool = False,
     limit: int | None = None,
+    workers: int | None = None,
+    flush_every: int = DEFAULT_FLUSH_ROWS,
 ) -> int:
     """Detect shots for every video in the probe manifest.
 
@@ -190,8 +201,6 @@ def build_shot_manifest(
     the new ones appended - the expensive detector never re-runs over a video a
     previous slice covered. `limit` caps how many *new* videos this run takes.
     """
-    rows: list[ClipManifestRow] = []
-
     # Materialised so the progress bar knows how many videos are coming; the
     # rows are metadata only, a few hundred bytes each.
     videos = list(iter_video_rows(videos_manifest))
@@ -200,19 +209,57 @@ def build_shot_manifest(
 
     done = existing_video_ids(out_path) if resume else set()
     pending = [video for video in videos if video.video_id not in done][:limit]
-    bar = tqdm(pending, desc="shot detection", unit="video")
 
-    for video in bar:
-        bar.set_postfix_str(video.video_id, refresh=False)
-        shots = detect_shots(video, detector, threshold, min_shot_frames)
-        rows.extend(shots)
+    work = partial(
+        _detect_for_video,
+        detector=detector,
+        threshold=threshold,
+        min_shot_frames=min_shot_frames,
+    )
+    results = parallel.map_videos(
+        work, pending, parallel.resolve_workers(workers), desc="shot detection"
+    )
+
+    total = count_rows(out_path) if resume and Path(out_path).is_file() else 0
+    pending_rows: list[ClipManifestRow] = []
+    appending = resume
+
+    for video, shots in results:
+        pending_rows.extend(shots)
         if on_progress is not None:
             on_progress(video.video_id, len(shots))
 
-    # ponytail: the manifest is written once, at the end, so a crashed run
-    # loses its own videos and re-does them. Flush per video if runs get long
-    # enough for that to hurt.
-    return write_rows(rows, out_path, CLIP_ARROW_SCHEMA, append=resume)
+        # Flush periodically rather than once at the end. This pass decodes
+        # every frame of 873 videos and takes hours; keeping all of it in
+        # memory meant a crash threw away the whole run, and `--resume` could
+        # only restart from nothing.
+        if len(pending_rows) >= flush_every:
+            total = write_rows(
+                _by_video(pending_rows), out_path, CLIP_ARROW_SCHEMA, append=appending
+            )
+            pending_rows = []
+            appending = True
+
+    if pending_rows or not appending:
+        total = write_rows(
+            _by_video(pending_rows), out_path, CLIP_ARROW_SCHEMA, append=appending
+        )
+    return total
+
+
+def _detect_for_video(
+    video: VideoManifestRow,
+    detector: str,
+    threshold: float | None,
+    min_shot_frames: int,
+) -> list[ClipManifestRow]:
+    """Module-level so the spawn context can pickle it into a worker."""
+    return detect_shots(video, detector, threshold, min_shot_frames)
+
+
+def _by_video(rows: list[ClipManifestRow]) -> list[ClipManifestRow]:
+    """Stable order within a flush, since workers finish out of order."""
+    return sorted(rows, key=lambda row: (row.video_id, row.shot_id))
 
 
 def main() -> None:
@@ -254,6 +301,12 @@ def main() -> None:
         default=None,
         help="detect at most this many new videos, for a trial slice",
     )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        help="worker processes; defaults to one fewer than the core count",
+    )
     args = parser.parse_args()
 
     if not Path(args.videos_manifest).is_file():
@@ -271,6 +324,7 @@ def main() -> None:
         on_progress=report,
         resume=args.resume,
         limit=args.limit,
+        workers=args.workers,
     )
     print(f"clips manifest now holds {count} shots: {args.out}")
 

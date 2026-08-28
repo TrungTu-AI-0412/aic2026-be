@@ -58,18 +58,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-hybrid", action="store_true")
     parser.add_argument("--no-rerank", action="store_true")
     parser.add_argument("--no-clips", action="store_true")
-    parser.add_argument(
-        "--no-ocr-boost",
-        action="store_true",
-        help="leave on-screen text as one equal branch of Qdrant's fusion "
-        "instead of weighting it as its own channel",
-    )
-    parser.add_argument(
-        "--ocr-weight",
-        type=float,
-        default=None,
-        help="sweep the boost weight; implies the boost is on",
-    )
     parser.add_argument("--label", default="baseline")
     args = parser.parse_args(argv)
 
@@ -85,10 +73,6 @@ def main(argv: list[str] | None = None) -> int:
         rerank_enabled=not args.no_rerank,
         rerank_top_n=settings.RERANK_TOP_N,
         rerank_model=settings.RERANK_MODEL,
-        ocr_boost_enabled=not args.no_ocr_boost,
-        ocr_boost_weight=(
-            settings.OCR_BOOST_WEIGHT if args.ocr_weight is None else args.ocr_weight
-        ),
     )
     config = replace(config, hybrid_enabled=not args.no_hybrid)
 
@@ -99,10 +83,6 @@ def main(argv: list[str] | None = None) -> int:
     print(f"hybrid  : {config.hybrid_enabled}")
     print(f"rerank  : {config.rerank_enabled}")
     print(f"clips   : {bool(config.clips_collection)}")
-    print(
-        f"ocr     : "
-        f"{f'boost w={config.ocr_boost_weight}' if config.ocr_boost_enabled else 'fused'}"
-    )
     for name, value in summary.items():
         print(f"{name:<12}: {value:.4f}")
     return 0

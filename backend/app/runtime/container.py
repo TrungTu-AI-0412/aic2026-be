@@ -34,16 +34,37 @@ async def build_container(settings: Settings) -> Container:
                 rerank_enabled=settings.RERANK_ENABLED,
                 rerank_top_n=settings.RERANK_TOP_N,
                 rerank_model=settings.RERANK_MODEL,
+                # These three were previously left at their dataclass defaults,
+                # which silently made the matching settings dead.
                 hybrid_enabled=settings.HYBRID_ENABLED,
                 ocr_boost_enabled=settings.OCR_BOOST_ENABLED,
                 ocr_boost_weight=settings.OCR_BOOST_WEIGHT,
+                sparse_method=settings.SPARSE_METHOD,
+                splade_model=settings.SPLADE_MODEL,
+                asr_collection=settings.QDRANT_ASR_COLLECTION,
+                asr_enabled=settings.ASR_ENABLED,
+                asr_profile=settings.ASR_FEATURE_PROFILE,
+                asr_weight=settings.ASR_WEIGHT,
+                asr_dense_weight=settings.ASR_DENSE_WEIGHT,
+                asr_sparse_weight=settings.ASR_SPARSE_WEIGHT,
+                asr_pad_sec=settings.ASR_PAD_SEC,
+                rewrite_enabled=settings.QUERY_REWRITE_ENABLED,
+                rewrite_base_url=settings.VLM_BASE_URL,
+                rewrite_model=settings.VLM_MODEL,
+                rewrite_api_key=settings.VLM_API_KEY,
+                rewrite_timeout_sec=settings.QUERY_REWRITE_TIMEOUT_SEC,
             )
         ),
         ingestion_service=SqliteIngestionService(
             db_path=settings.INGESTION_DB_PATH,
             data_root=settings.INGESTION_DATA_ROOT,
         ),
-        media_service=LocalMediaService(data_root=settings.INGESTION_DATA_ROOT),
+        media_service=LocalMediaService(
+            data_root=settings.INGESTION_DATA_ROOT,
+            videos_manifest=settings.MEDIA_VIDEOS_MANIFEST,
+            keyframes_dir=settings.MEDIA_KEYFRAMES_DIR,
+            frames_manifest=settings.MEDIA_FRAMES_MANIFEST,
+        ),
         submission_service=LocalSubmissionService(
             bounds_manifest=settings.SUBMISSION_BOUNDS_PATH
             or str(Path(settings.INGESTION_DATA_ROOT) / "video_bounds.parquet")

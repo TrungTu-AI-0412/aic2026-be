@@ -54,7 +54,11 @@ def _build_points(count: int) -> list:
 def test_create_collection_upsert_and_read_status(client, collection_name):
     assert not collections.collection_exists(client, collection_name)
 
-    collections.create_collection(client, collection_name, VECTOR_SIZE)
+    collections.create_collection(
+        client,
+        collection_name,
+        dense_vectors={collections.DENSE_VECTOR_NAME: VECTOR_SIZE},
+    )
     payload_indexes.create_payload_indexes(
         client, collection_name, IngestionEntity.FRAMES
     )

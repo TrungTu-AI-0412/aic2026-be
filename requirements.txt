@@ -19,6 +19,12 @@ transnetv2-pytorch==1.0.5
 # Ingestion progress bars. Already pulled in transitively by the two lines
 # around it; pinned here because ingestion imports it directly.
 tqdm>=4.66,<5
+# `transformers` also provides the fast (torchvision-backed) image processor,
+# which is what lets keyframe preprocessing run on the GPU: the slow PIL path
+# measured 126 img/s against a 174 img/s model and was the ingestion bottleneck.
 transformers>=4.49,<5
 pillow>=11,<13
 pydantic-settings>=2.6,<3
+# Source of the ASR transcripts (`scripts/download_kaggle_transcripts.py`).
+# Ingestion does not import it; it is only needed to re-fetch the corpus.
+kagglehub>=0.3,<2

@@ -1,5 +1,6 @@
 from fractions import Fraction
 
+import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 from pydantic import ValidationError
@@ -73,8 +74,22 @@ class TestKeyframeRowMapping:
             "keyframe_n": 12,
             "original_frame_id": 415,
             "pts_sec": 16.6,
+            "shot_start_sec": 0.0,
+            "shot_end_sec": 0.0,
             "path": "/data/keyframes/L01_V001/000415.jpg",
         }
+
+    def test_shot_range_survives_a_zero_start(self):
+        """The first shot of a video legitimately starts at 0.0 seconds.
+
+        The range is written unconditionally rather than dropped when empty:
+        the ASR overlap bonus reads it, and a missing `shot_start_sec` would be
+        indistinguishable from a shot that genuinely begins at zero.
+        """
+        payload = _keyframe(shot_start_sec=0.0, shot_end_sec=4.5).payload()
+
+        assert payload["shot_start_sec"] == 0.0
+        assert payload["shot_end_sec"] == 4.5
 
     def test_negative_original_frame_id_is_rejected(self):
         with pytest.raises(ValidationError):
@@ -89,15 +104,33 @@ class TestEnrichmentPayload:
     def test_enrichment_reaches_the_payload(self):
         payload = _keyframe(
             objects=["Person", "Boat"],
-            asr_text="xin chào",
-            asr_entities=["Hà Nội"],
-            publish_date="01/08/2024",
+            ocr_text="TẠM DỪNG LƯU THÔNG",
+            title="Bản tin 60 giây",
         ).payload()
 
         assert payload["objects"] == ["Person", "Boat"]
-        assert payload["asr_text"] == "xin chào"
-        assert payload["asr_entities"] == ["Hà Nội"]
-        assert payload["publish_date"] == "01/08/2024"
+        assert payload["ocr_text"] == "TẠM DỪNG LƯU THÔNG"
+        assert payload["title"] == "Bản tin 60 giây"
+
+    def test_frames_no_longer_carry_asr_text(self):
+        """Speech lives in its own collection, keyed by time, not by frame.
+
+        Pooling a shot's transcript onto every keyframe as well would let the
+        ASR-overlap bonus and a lexical frame match score the same speech twice.
+        """
+        row = _keyframe()
+
+        assert not hasattr(row, "asr_text")
+        assert not hasattr(row, "asr_entities")
+        assert "asr_text" not in row.payload()
+
+    def test_publish_date_and_keywords_are_gone(self):
+        """Neither survived: one sorts wrong as a string, the other only ever
+        padded the frame speech vector that no longer exists."""
+        row = _keyframe()
+
+        assert not hasattr(row, "publish_date")
+        assert not hasattr(row, "keywords")
 
     def test_absent_enrichment_leaves_the_payload_minimal(self):
         """Empty values are dropped rather than indexed as matchless terms."""
@@ -109,13 +142,15 @@ class TestEnrichmentPayload:
             "keyframe_n",
             "original_frame_id",
             "pts_sec",
+            "shot_start_sec",
+            "shot_end_sec",
             "path",
         }
 
     def test_clips_carry_enrichment_too(self):
-        payload = _clip(asr_text="bản tin", objects=["Person"]).payload()
+        payload = _clip(ocr_text="bản tin", objects=["Person"]).payload()
 
-        assert payload["asr_text"] == "bản tin"
+        assert payload["ocr_text"] == "bản tin"
         assert payload["objects"] == ["Person"]
 
     def test_a_manifest_without_enrichment_columns_still_validates(self):
@@ -130,7 +165,7 @@ class TestEnrichmentPayload:
         )
 
         assert row.objects == []
-        assert row.asr_text == ""
+        assert row.ocr_text == ""
 
 
 class TestClipRowMapping:
@@ -316,47 +351,56 @@ class TestOcrEnrichment:
         assert manifest.KeyframeManifestRow.model_validate(self.BASE).ocr_text == ""
 
 
-class TestCaptionEnrichment:
-    BASE = {
-        "video_id": "L21_V001",
-        "shot_id": 0,
-        "keyframe_n": 1,
-        "original_frame_id": 0,
-        "pts_sec": 0.0,
-        "path": "keyframes/L21_V001/001.jpg",
-    }
+class TestAppendAcrossSchemaChange:
+    def test_resuming_into_an_older_manifest_is_refused(self, tmp_path):
+        """Silent null back-fill is the expensive failure mode.
 
-    def test_caption_and_vlm_text_reach_the_payload(self) -> None:
-        row = manifest.KeyframeManifestRow.model_validate(
-            {
-                **self.BASE,
-                "caption_vi": "Cảnh quay từ trên cao một vùng đất ven biển.",
-                "ocr_text_vlm": "CẢNH BÁO SẠT LỞ NGUY HIỂM",
-            }
+        `read_table(schema=...)` happily invents a column the old file lacks and
+        fills it with nulls. That passes `validate_columns` -- the column now
+        exists -- and only fails when a row is parsed, i.e. after a multi-hour
+        decode pass has already been paid for. Observed producing 5 314
+        null-`keyframe_n` rows against a real stale manifest.
+        """
+        out = tmp_path / "frames.parquet"
+        old_schema = pa.schema(
+            [
+                ("video_id", pa.string()),
+                ("shot_id", pa.int32()),
+                ("original_frame_id", pa.int64()),
+                ("pts_sec", pa.float64()),
+                ("path", pa.string()),
+            ]
         )
-        payload = row.enrichment_payload()
-
-        assert payload["caption_vi"].startswith("Cảnh quay")
-        assert payload["ocr_text_vlm"] == "CẢNH BÁO SẠT LỞ NGUY HIỂM"
-
-    def test_the_two_ocr_readings_stay_separate_fields(self) -> None:
-        """Both feed one sparse vector, but the recogniser's reading is never
-        overwritten by the model's — they fail on different type."""
-        row = manifest.KeyframeManifestRow.model_validate(
-            {
-                **self.BASE,
-                "ocr_text": "CẢMH BÁO SẠT LỎ",
-                "ocr_text_vlm": "CẢNH BÁO SẠT LỞ NGUY HIỂM",
-            }
+        pq.write_table(
+            pa.table(
+                {
+                    "video_id": ["L01_V001"],
+                    "shot_id": [0],
+                    "original_frame_id": [0],
+                    "pts_sec": [0.0],
+                    "path": ["k.jpg"],
+                },
+                schema=old_schema,
+            ),
+            out,
         )
 
-        assert row.ocr_text == "CẢMH BÁO SẠT LỎ"
-        assert row.ocr_text_vlm == "CẢNH BÁO SẠT LỞ NGUY HIỂM"
+        with pytest.raises(ValueError, match="predates this schema"):
+            manifest.write_rows(
+                [_keyframe()], str(out), manifest.KEYFRAME_ARROW_SCHEMA, append=True
+            )
 
-    def test_a_frame_with_no_caption_writes_no_caption_payload(self) -> None:
-        payload = manifest.KeyframeManifestRow.model_validate(
-            self.BASE
-        ).enrichment_payload()
+    def test_appending_to_a_matching_manifest_still_works(self, tmp_path):
+        out = tmp_path / "frames.parquet"
+        manifest.write_rows(
+            [_keyframe(keyframe_n=1)], str(out), manifest.KEYFRAME_ARROW_SCHEMA
+        )
 
-        assert "caption_vi" not in payload
-        assert "ocr_text_vlm" not in payload
+        total = manifest.write_rows(
+            [_keyframe(keyframe_n=2)],
+            str(out),
+            manifest.KEYFRAME_ARROW_SCHEMA,
+            append=True,
+        )
+
+        assert total == 2

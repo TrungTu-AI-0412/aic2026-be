@@ -32,13 +32,34 @@ class ScoredFrame:
     # source video, and that needs timestamps, not frame indexes.
     start_sec: float | None = None
     end_sec: float | None = None
-    # The on-screen text this point carries, for an operator to confirm a
-    # lexical hit against without opening the frame. Both recognisers are
-    # joined rather than one being preferred: the VLM reading has correct
-    # diacritics but the EasyOCR reading is what a folded query token may have
-    # actually matched, so dropping either can show text that does not
-    # contain the query that found it.
+    # Keyframe points: when in the video this frame is, and the span of the shot
+    # it came from. Both are read by the ASR overlap bonus, which has to ask
+    # whether a stretch of speech covers this frame. They were already in the
+    # payload and simply discarded before.
+    pts_sec: float | None = None
+    shot_start_sec: float | None = None
+    shot_end_sec: float | None = None
+    # Both recognisers' readings of this frame, joined. Carried so a lexical
+    # hit can show its own evidence: "sạt lở bờ sông" ranking first says
+    # nothing about whether it matched a chyron, a caption or a subtitle, and
+    # an operator deciding whether to submit needs to see which.
     ocr_text: str | None = None
+
+    def time_window(self, pad_sec: float = 0.0) -> tuple[float, float] | None:
+        """The span of video time this hit covers, or None if unknown.
+
+        Prefers the shot range, falling back to the frame's own instant. A
+        keyframe is a single moment but the speech describing it runs either
+        side, so an instant alone would match almost no segment.
+        """
+        if self.shot_start_sec is not None and self.shot_end_sec is not None:
+            if self.shot_end_sec > self.shot_start_sec:
+                return (self.shot_start_sec - pad_sec, self.shot_end_sec + pad_sec)
+        if self.start_sec is not None and self.end_sec is not None:
+            return (self.start_sec - pad_sec, self.end_sec + pad_sec)
+        if self.pts_sec is not None:
+            return (self.pts_sec - pad_sec, self.pts_sec + pad_sec)
+        return None
 
     @property
     def representative_frame(self) -> int:
@@ -50,6 +71,23 @@ class ScoredFrame:
         if self.original_frame_id is not None:
             return self.original_frame_id
         return self.start_frame or 0
+
+
+@dataclass(frozen=True)
+class AsrSegment:
+    """One speech segment retrieved from the ASR collection.
+
+    Lives here beside `ScoredFrame` for the same reason: search returns plain
+    dataclasses so ranking and the API never import Qdrant types. Ranking
+    depends on this module, never the other way round.
+    """
+
+    score: float
+    video_id: str
+    start_sec: float
+    end_sec: float
+    segment: int = 0
+    text: str = ""
 
 
 def build_filter(
@@ -82,7 +120,8 @@ def search(
     limit: int = DEFAULT_LIMIT,
     query_filter: qmodels.Filter | None = None,
     sparse_query: SparseVector | None = None,
-    sparse_names: Sequence[str] = collections.SPARSE_VECTOR_NAMES,
+    sparse_names: Sequence[str] = (),
+    dense_name: str = collections.DENSE_VECTOR_NAME,
 ) -> list[ScoredFrame]:
     """Dense search, fused with lexical search when the query has terms.
 
@@ -95,21 +134,25 @@ def search(
     common scale — a weighted sum of the two would be dominated by whichever
     happens to have the wider range on a given query.
 
-    `sparse_names` must name only slots that some point actually carries.
-    Querying an empty slot is wasted work against a server and raises outright
-    against the in-memory client, which registers a slot's IDF statistics only
-    once a point uses it. All three are populated by the current manifest;
-    narrow this argument when ingesting one that predates OCR or captions.
+    `sparse_names` covers the slots that actually hold vectors, not every slot
+    the collection declares. It defaults to empty because querying a slot no
+    point carries is wasted work against a server and raises outright against
+    the in-memory client, which only registers a slot's IDF statistics once a
+    point uses it. Frames declare `ocr` but do not populate it yet, so callers
+    pass the names in explicitly once they are filled.
 
-    The engine also narrows it to drop `ocr` when the OCR boost is on, so that
-    on-screen text is counted once — as its own weighted channel — rather than
-    once here at RRF's fixed weight and again on top.
+    `dense_name` selects the dense space to search: frames hold image vectors in
+    `dense_video`, ASR segments hold text vectors in `dense_text`, and the two
+    are different dimensions.
     """
-    if sparse_query:
+    # Both are needed for the hybrid path: a lexical query with nowhere to match
+    # would fuse a single ranked list with itself, paying for RRF to change
+    # nothing.
+    if sparse_query and sparse_names:
         prefetch = [
             qmodels.Prefetch(
                 query=vector,
-                using=collections.DENSE_VECTOR_NAME,
+                using=dense_name,
                 limit=limit,
                 filter=query_filter,
             )
@@ -136,7 +179,7 @@ def search(
         response = client.query_points(
             collection_name=collection_name,
             query=vector,
-            using=collections.DENSE_VECTOR_NAME,
+            using=dense_name,
             limit=limit,
             query_filter=query_filter,
             with_payload=True,
@@ -152,18 +195,13 @@ def search_sparse(
     limit: int = DEFAULT_LIMIT,
     query_filter: qmodels.Filter | None = None,
 ) -> list[ScoredFrame]:
-    """Search one lexical slot on its own, with no dense branch at all.
+    """One sparse slot, queried on its own with no dense branch to fuse.
 
-    `search` above always anchors on the image vector, which is right for a
-    query that describes a scene and wrong for one that quotes a caption or a
-    name. A ticker reading "Nguyễn Xuân Son" has no visual signature, so a
-    fused query still spends most of its result budget on frames that merely
-    look plausible. Querying the slot alone gives the whole budget to points
-    that actually contain the words.
-
-    Scores here are Qdrant's IDF-weighted lexical scores and are *not*
-    comparable with the cosine similarities `search` returns. Anything that
-    combines the two lists must fuse on rank — see `app/ranking/boost.py`.
+    `search` above always leads with a dense vector and treats the lexical
+    slots as prefetches. This is the other shape: the query *is* the lexical
+    one. It exists because on-screen text is sometimes the whole of what the
+    operator knows, and routing that through a dense encoder adds a signal
+    nobody asked for and a rank the text cannot influence.
     """
     response = client.query_points(
         collection_name=collection_name,
@@ -178,10 +216,129 @@ def search_sparse(
     return [_to_scored_frame(point) for point in response.points]
 
 
+def search_asr(
+    client: QdrantClient,
+    collection_name: str,
+    vector: list[float] | None,
+    sparse_query: SparseVector | None,
+    limit: int = DEFAULT_LIMIT,
+    query_filter: qmodels.Filter | None = None,
+) -> tuple[list[AsrSegment], list[AsrSegment]]:
+    """Search the speech collection, returning the two branches separately.
+
+    Deliberately *not* fused server-side. The dense and lexical halves have to
+    be combined with an explicit weight, and Qdrant's RRF fuses ranks with no
+    weight to give, so `ranking.asr.fuse_asr` does it once both lists are back.
+
+    Either branch may be skipped by passing None, which is how the toggles turn
+    a hybrid speech query into a purely dense or purely lexical one.
+    """
+    dense_hits: list[AsrSegment] = []
+    sparse_hits: list[AsrSegment] = []
+
+    if vector is not None:
+        response = client.query_points(
+            collection_name=collection_name,
+            query=vector,
+            using=collections.DENSE_TEXT_NAME,
+            limit=limit,
+            query_filter=query_filter,
+            with_payload=True,
+        )
+        dense_hits = [_to_asr_segment(point) for point in response.points]
+
+    if sparse_query:
+        response = client.query_points(
+            collection_name=collection_name,
+            query=qmodels.SparseVector(
+                indices=sparse_query.indices, values=sparse_query.values
+            ),
+            using=collections.SPARSE_SPEECH,
+            limit=limit,
+            query_filter=query_filter,
+            with_payload=True,
+        )
+        sparse_hits = [_to_asr_segment(point) for point in response.points]
+
+    return dense_hits, sparse_hits
+
+
+def scroll_frames_for_asr_segments(
+    client: QdrantClient,
+    collection_name: str,
+    segments: Sequence[AsrSegment],
+    page_size: int = 256,
+) -> list[ScoredFrame]:
+    """Read sampled frames whose shots overlap any retrieved speech segment.
+
+    ASR-only retrieval has no image vector with which to query the frame
+    collection. The temporal payload is the join key: each `should` branch
+    keeps the video identity and the two sides of the interval together, then
+    scrolling returns every candidate frame in one paginated operation.
+    """
+    windows = list(
+        dict.fromkeys(
+            (segment.video_id, segment.start_sec, segment.end_sec)
+            for segment in segments
+            if segment.video_id
+        )
+    )
+    if not windows:
+        return []
+
+    query_filter = qmodels.Filter(
+        should=[
+            qmodels.Filter(
+                must=[
+                    qmodels.FieldCondition(
+                        key="video_id", match=qmodels.MatchValue(value=video_id)
+                    ),
+                    qmodels.FieldCondition(
+                        key="shot_start_sec", range=qmodels.Range(lte=end_sec)
+                    ),
+                    qmodels.FieldCondition(
+                        key="shot_end_sec", range=qmodels.Range(gte=start_sec)
+                    ),
+                ]
+            )
+            for video_id, start_sec, end_sec in windows
+        ]
+    )
+
+    frames: list[ScoredFrame] = []
+    offset = None
+    while True:
+        points, offset = client.scroll(
+            collection_name=collection_name,
+            scroll_filter=query_filter,
+            limit=page_size,
+            offset=offset,
+            with_payload=True,
+            with_vectors=False,
+        )
+        frames.extend(_to_scored_frame(point) for point in points)
+        if offset is None:
+            return frames
+
+
+def _to_asr_segment(point) -> AsrSegment:
+    payload = point.payload or {}
+    return AsrSegment(
+        score=float(point.score),
+        video_id=str(payload.get("video_id", "")),
+        start_sec=float(payload.get("start_sec") or 0.0),
+        end_sec=float(payload.get("end_sec") or 0.0),
+        segment=int(payload.get("segment") or 0),
+        text=str(payload.get("text_corrected") or ""),
+    )
+
+
 def _to_scored_frame(point) -> ScoredFrame:
     payload = point.payload or {}
     return ScoredFrame(
-        score=float(point.score),
+        # `query_points` carries similarity; payload-only `scroll` records do
+        # not. ASR-only ranking uses the segment score after this temporal join.
+        score=float(getattr(point, "score", 0.0)),
         video_id=str(payload.get("video_id", "")),
         shot_id=int(payload.get("shot_id", 0)),
         original_frame_id=_optional_int(payload.get("original_frame_id")),
@@ -190,15 +347,19 @@ def _to_scored_frame(point) -> ScoredFrame:
         path=payload.get("path"),
         start_sec=_optional_float(payload.get("start_sec")),
         end_sec=_optional_float(payload.get("end_sec")),
+        pts_sec=_optional_float(payload.get("pts_sec")),
+        shot_start_sec=_optional_float(payload.get("shot_start_sec")),
+        shot_end_sec=_optional_float(payload.get("shot_end_sec")),
         ocr_text=_joined_ocr(payload),
     )
 
 
 def _joined_ocr(payload: dict) -> str | None:
-    """Both readings of this point's on-screen text, VLM first.
+    """Both recognisers' readings, in the order they were trusted.
 
-    `enrichment_payload` omits empty fields, so a point with neither reading
-    has neither key and reports None rather than an empty string.
+    The two disagree often — one reads a diacritic the other drops — and
+    neither is reliably better, so both are shown rather than one being picked
+    on the operator's behalf.
     """
     parts = [
         str(payload[key]).strip()

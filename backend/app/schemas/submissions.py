@@ -1,7 +1,7 @@
 from enum import Enum
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 MAX_CANDIDATES = 100
 
@@ -22,12 +22,32 @@ class KisCandidate(BaseModel):
 
 
 class QaCandidate(BaseModel):
+    """A frame plus the answer the operator read off it.
+
+    `answer` is human input - no VQA model produces it - so it arrives with
+    whatever a paste carried.
+    """
+
     model_config = ConfigDict(extra="forbid")
 
     task: Literal["qa"]
     video_id: str = Field(pattern=VIDEO_ID_PATTERN)
     frame_id: int = Field(ge=0)
     answer: str = Field(min_length=1)
+
+    @field_validator("answer")
+    @classmethod
+    def collapse_whitespace(cls, value: str) -> str:
+        """One line, no padding.
+
+        A newline inside a quoted CSV field is legal but still splits the row
+        for a grader that counts lines - the same failure the headerless format
+        exists to avoid. Commas are left alone: the writer quotes them.
+        """
+        collapsed = " ".join(value.split())
+        if not collapsed:
+            raise ValueError("answer must not be blank")
+        return collapsed
 
 
 class TrakeCandidate(BaseModel):
@@ -41,6 +61,13 @@ class TrakeCandidate(BaseModel):
     def validate_event_frame_ids(self) -> "TrakeCandidate":
         if any(frame_id < 0 for frame_id in self.event_frame_ids):
             raise ValueError("event_frame_ids must be non-negative")
+        if any(
+            current >= following
+            for current, following in zip(
+                self.event_frame_ids, self.event_frame_ids[1:]
+            )
+        ):
+            raise ValueError("event_frame_ids must be strictly increasing")
         return self
 
 

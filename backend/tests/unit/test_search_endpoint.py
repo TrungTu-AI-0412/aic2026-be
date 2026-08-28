@@ -1,95 +1,201 @@
-"""The HTTP surface of /search/ocr.
-
-Mounts the router alone rather than the whole app: `create_app` builds the
-retrieval container, which drags in torch, and none of that is under test
-here. What is under test is the request contract the frontend codegens from.
-"""
-
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.api.deps import get_search_service
 from app.api.endpoints import search as endpoint
-from app.schemas.search import (
-    OcrSearchRequest,
-    SearchResponse,
-    SearchResult,
-    SearchVersions,
-)
+from app.retrieval.decompose import DecompositionUnavailableError
+from app.retrieval.engine import AsrOnlyRequestError, AsrOnlyUnavailableError
 
 
-class StubSearchService:
-    def __init__(self) -> None:
-        self.received: OcrSearchRequest | None = None
+class FakeSearchService:
+    def __init__(self, error: Exception | None = None) -> None:
+        self.error = error
 
-    async def search_ocr(self, request: OcrSearchRequest) -> SearchResponse:
-        self.received = request
-        return SearchResponse(
-            request_id="req-1",
-            task="ocr",
-            results=[
-                SearchResult(
-                    rank=1,
-                    video_id="L21_V001",
-                    frame_ids=[540],
-                    score=9.1,
-                    ocr_text="TẠM DỪNG LƯU THÔNG",
-                )
+    async def search_kis(self, request):
+        return self._result("kis")
+
+    async def search_qa(self, request):
+        return self._result("qa")
+
+    async def decompose(self, request):
+        if self.error is not None:
+            raise self.error
+        return {
+            "source": "llm",
+            "overview": {"original": None, "vision": "a lantern festival",
+                         "speech": "lễ hội đèn lồng"},
+            "events": [
+                {"original": None, "vision": "lanterns being lit",
+                 "speech": "thắp đèn lồng"}
             ],
-            versions=SearchVersions(
-                frames_collection="frames-v1", model_config_name="clip-b32-v1"
-            ),
-            latency_ms={"ocr": 4.2},
-        )
+            "latency_ms": {"decompose": 900.0, "caption": 400.0},
+        }
+
+    def _result(self, task: str):
+        if self.error is not None:
+            raise self.error
+        return {
+            "request_id": "request-123",
+            "task": task,
+            "effective_retrieval_mode": "asr_only",
+            "rewritten_queries": ["an English report"],
+            "cleaned_queries": ["bản tin tiếng Việt"],
+            "results": [],
+            "versions": {
+                "frames_collection": "frames-v1",
+                "clips_collection": None,
+                "model_config_name": "vision-v1",
+                "asr_collection": "asr-v1",
+                "asr_model_config_name": "qwen-v1",
+            },
+            "latency_ms": {"rewrite": 1.0, "asr": 2.0, "asr_frame_map": 0.0},
+        }
 
 
-@pytest.fixture
-def stub():
-    return StubSearchService()
-
-
-@pytest.fixture
-def client(stub):
+def make_client(error: Exception | None = None) -> TestClient:
     app = FastAPI()
-    app.include_router(endpoint.router)
-    app.dependency_overrides[get_search_service] = lambda: stub
+    app.include_router(endpoint.router, prefix="/api/v1")
+    app.dependency_overrides[get_search_service] = lambda: FakeSearchService(error)
     return TestClient(app)
 
 
-def test_a_lexical_hit_carries_the_text_that_matched(client):
-    response = client.post(
-        "/search/ocr", json={"task": "ocr", "text": "tạm dừng lưu thông"}
+@pytest.mark.parametrize(
+    ("path", "body"),
+    [
+        (
+            "/api/v1/search/kis",
+            {"task": "kis", "description": "lời thoại", "top_k": 5},
+        ),
+        (
+            "/api/v1/search/qa",
+            {"task": "qa", "description": "lời thoại", "top_k": 5},
+        ),
+    ],
+)
+def test_asr_unavailable_is_a_503(path, body) -> None:
+    response = make_client(AsrOnlyUnavailableError("ASR index unavailable")).post(
+        path,
+        json={**body, "retrieval_mode": "asr_only"},
     )
 
-    assert response.status_code == 200
-    assert response.json()["results"][0]["ocr_text"] == "TẠM DỪNG LƯU THÔNG"
+    assert response.status_code == 503
+    assert response.json()["detail"] == "ASR index unavailable"
 
 
-def test_video_ids_reach_the_service(client, stub):
-    client.post(
-        "/search/ocr",
-        json={"task": "ocr", "text": "sạt lở", "video_ids": ["L21_V001"]},
+def test_runtime_invalid_asr_request_is_a_422() -> None:
+    response = make_client(AsrOnlyRequestError("weights cannot both be zero")).post(
+        "/api/v1/search/kis",
+        json={
+            "task": "kis",
+            "description": "lời thoại",
+            "top_k": 5,
+            "retrieval_mode": "asr_only",
+        },
     )
 
-    assert stub.received.video_ids == ["L21_V001"]
+    assert response.status_code == 422
+    assert response.json()["detail"] == "weights cannot both be zero"
 
 
-def test_video_ids_are_optional(client, stub):
-    client.post("/search/ocr", json={"task": "ocr", "text": "sạt lở"})
-
-    assert stub.received.video_ids is None
-
-
-def test_an_empty_query_is_rejected(client):
-    """There is nothing to match on, and an empty sparse vector would return
-    an arbitrary page of the collection rather than no results."""
-    response = client.post("/search/ocr", json={"task": "ocr", "text": ""})
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"retrieval_mode": "asr_only", "asr_enabled": True},
+        {
+            "retrieval_mode": "asr_only",
+            "asr_dense_weight": 0,
+            "asr_sparse_weight": 0,
+        },
+    ],
+)
+def test_incompatible_asr_only_fields_are_a_422(overrides) -> None:
+    response = make_client().post(
+        "/api/v1/search/kis",
+        json={
+            "task": "kis",
+            "description": "lời thoại",
+            "top_k": 5,
+            **overrides,
+        },
+    )
 
     assert response.status_code == 422
 
 
-def test_the_wrong_task_discriminator_is_rejected(client):
-    response = client.post("/search/ocr", json={"task": "kis", "text": "x"})
+def test_trake_rejects_asr_only_mode() -> None:
+    response = make_client().post(
+        "/api/v1/search/trake",
+        json={
+            "task": "trake",
+            "overview": "một chuỗi sự kiện",
+            "events": ["sự kiện một"],
+            "top_k": 5,
+            "retrieval_mode": "asr_only",
+        },
+    )
+
+    assert response.status_code == 422
+
+
+def test_valid_query_with_no_asr_hits_is_an_empty_200() -> None:
+    response = make_client().post(
+        "/api/v1/search/kis",
+        json={
+            "task": "kis",
+            "description": "không có lời thoại phù hợp",
+            "top_k": 5,
+            "retrieval_mode": "asr_only",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["results"] == []
+    assert response.json()["effective_retrieval_mode"] == "asr_only"
+
+
+def test_decompose_returns_both_forms_for_review() -> None:
+    response = make_client().post(
+        "/api/v1/search/decompose",
+        json={"query": "Đoạn video mô tả lễ hội đèn lồng, sau đó thắp đèn"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["source"] == "llm"
+    assert body["overview"]["vision"] == "a lantern festival"
+    assert body["events"][0]["speech"] == "thắp đèn lồng"
+
+
+def test_a_decomposition_that_never_happened_is_a_503() -> None:
+    """No fallback here: the decomposition is the entire product of the call."""
+    response = make_client(
+        DecompositionUnavailableError("query decomposition failed")
+    ).post("/api/v1/search/decompose", json={"query": "một chuỗi sự kiện"})
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "query decomposition failed"
+
+
+def test_kis_rejects_events_without_an_overview() -> None:
+    response = make_client().post(
+        "/api/v1/search/kis",
+        json={"task": "kis", "description": "x", "events": ["sự kiện một"]},
+    )
+
+    assert response.status_code == 422
+
+
+def test_temporal_kis_rejects_asr_only_mode() -> None:
+    response = make_client().post(
+        "/api/v1/search/kis",
+        json={
+            "task": "kis",
+            "description": "x",
+            "overview": "tổng quan",
+            "events": ["sự kiện một"],
+            "retrieval_mode": "asr_only",
+        },
+    )
 
     assert response.status_code == 422

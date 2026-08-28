@@ -63,7 +63,7 @@ Prompt không được công bố.
 
 Đây là dịch vụ đám mây, nhưng nằm ở **tiền xử lý** nên không vi phạm ràng buộc
 "không phụ thuộc cloud trong query path". Ta đã có thứ tương đương: cột
-`asr_text_corrected` trong `frames.parquet` đến từ nguồn ASR ngoài.
+`asr_text_corrected` trong `frames.parquet` đến từ dataset `zzzlazy/aic-asr`.
 
 ## 6. Lưu trữ
 

@@ -7,13 +7,17 @@ venv/
 .venv*/
 .DS_Store
 data/*
+# The artefact reference is documentation, not data.
+!data/ARTIFACTS.md
 artifacts/
 *.npy
-# VPN client configs embed a private key.
-*.ovpn
-# SSH keys. This repo is public and `git add -A` would publish one.
+*.log
+
+# Key material. A .pem sat untracked and unignored at the root of this public
+# repository; ignore by extension so a wildcard add cannot commit the next one.
 *.pem
 *.key
 id_rsa*
-# Competitive notes — never published.
-private/
+# VPN profiles: these embed a CA, a client certificate and a client private
+# key inline. tung.ovpn was staged by a wildcard add during a merge.
+*.ovpn
