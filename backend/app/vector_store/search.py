@@ -39,6 +39,11 @@ class ScoredFrame:
     pts_sec: float | None = None
     shot_start_sec: float | None = None
     shot_end_sec: float | None = None
+    # Both recognisers' readings of this frame, joined. Carried so a lexical
+    # hit can show its own evidence: "sạt lở bờ sông" ranking first says
+    # nothing about whether it matched a chyron, a caption or a subtitle, and
+    # an operator deciding whether to submit needs to see which.
+    ocr_text: str | None = None
 
     def time_window(self, pad_sec: float = 0.0) -> tuple[float, float] | None:
         """The span of video time this hit covers, or None if unknown.
@@ -182,6 +187,35 @@ def search(
     return [_to_scored_frame(point) for point in response.points]
 
 
+def search_sparse(
+    client: QdrantClient,
+    collection_name: str,
+    sparse_query: SparseVector,
+    using: str = collections.SPARSE_OCR,
+    limit: int = DEFAULT_LIMIT,
+    query_filter: qmodels.Filter | None = None,
+) -> list[ScoredFrame]:
+    """One sparse slot, queried on its own with no dense branch to fuse.
+
+    `search` above always leads with a dense vector and treats the lexical
+    slots as prefetches. This is the other shape: the query *is* the lexical
+    one. It exists because on-screen text is sometimes the whole of what the
+    operator knows, and routing that through a dense encoder adds a signal
+    nobody asked for and a rank the text cannot influence.
+    """
+    response = client.query_points(
+        collection_name=collection_name,
+        query=qmodels.SparseVector(
+            indices=sparse_query.indices, values=sparse_query.values
+        ),
+        using=using,
+        limit=limit,
+        query_filter=query_filter,
+        with_payload=True,
+    )
+    return [_to_scored_frame(point) for point in response.points]
+
+
 def search_asr(
     client: QdrantClient,
     collection_name: str,
@@ -316,7 +350,23 @@ def _to_scored_frame(point) -> ScoredFrame:
         pts_sec=_optional_float(payload.get("pts_sec")),
         shot_start_sec=_optional_float(payload.get("shot_start_sec")),
         shot_end_sec=_optional_float(payload.get("shot_end_sec")),
+        ocr_text=_joined_ocr(payload),
     )
+
+
+def _joined_ocr(payload: dict) -> str | None:
+    """Both recognisers' readings, in the order they were trusted.
+
+    The two disagree often — one reads a diacritic the other drops — and
+    neither is reliably better, so both are shown rather than one being picked
+    on the operator's behalf.
+    """
+    parts = [
+        str(payload[key]).strip()
+        for key in ("ocr_text_vlm", "ocr_text")
+        if payload.get(key)
+    ]
+    return " · ".join(parts) if parts else None
 
 
 def _optional_int(value) -> int | None:

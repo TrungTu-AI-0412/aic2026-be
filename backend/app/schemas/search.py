@@ -212,6 +212,34 @@ class QaSearchRequest(FrameSearchOverrides):
     top_k: int = Field(default=100, ge=1, le=100)
 
 
+class OcrSearchRequest(BaseModel):
+    """The on-screen text channel on its own, with nothing layered over it.
+
+    No image encoder and no reranker. BLIP ITM scores how well a caption
+    describes a picture, and a ticker, a scoreboard or a chyron is not what the
+    picture is *of* — asking it to judge these hits demotes exactly the frames
+    the query asked for. So this path stops at the lexical score.
+
+    The query is not rewritten either. An operator reaching for this endpoint
+    has read the text off the screen and is typing it back verbatim; a
+    rewriter's job is to turn prose into a caption, which here would corrupt
+    the one signal being searched.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    task: Literal["ocr"]
+    text: str = Field(
+        min_length=1,
+        description="The on-screen text to look for, as it appears on screen.",
+    )
+    top_k: int = Field(default=100, ge=1, le=100)
+    video_ids: list[str] | None = Field(
+        default=None,
+        description="Restrict to these videos. None searches the collection.",
+    )
+
+
 class TrakeSearchRequest(AsrOverrides, TemporalOverrides):
     model_config = ConfigDict(extra="forbid")
 
@@ -301,6 +329,11 @@ class SearchResult(BaseModel):
     # operator which event landed where in time, which is what this carries.
     events: list[EventHit] | None = None
     asr_evidence: AsrEvidence | None = None
+    # Both recognisers' readings of this frame, joined. Populated by the OCR
+    # channel and by any search the OCR boost contributed to; None elsewhere.
+    # It is the evidence for a lexical hit: an operator cannot tell whether
+    # "sạt lở bờ sông" matched a chyron or a caption without seeing the text.
+    ocr_text: str | None = None
 
 
 class SearchVersions(BaseModel):
@@ -313,7 +346,7 @@ class SearchVersions(BaseModel):
 
 class SearchResponse(BaseModel):
     request_id: str
-    task: Literal["kis", "qa", "trake"]
+    task: Literal["kis", "qa", "trake", "ocr"]
     effective_retrieval_mode: RetrievalMode = "visual"
     # The English form the rewriting step produced, which is what the image
     # space and the reranker were given. `[description]` for KIS and QA;

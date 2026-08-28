@@ -7,6 +7,7 @@ from app.schemas.search import (
     DecomposeRequest,
     DecomposeResponse,
     KisSearchRequest,
+    OcrSearchRequest,
     QaSearchRequest,
     SearchResponse,
     TrakeSearchRequest,
@@ -77,3 +78,11 @@ async def search_trake(
     search_service: SearchService = Depends(get_search_service),
 ) -> SearchResponse:
     return await search_service.search_trake(request)
+
+
+@router.post("/search/ocr", response_model=SearchResponse)
+async def search_ocr(
+    request: OcrSearchRequest,
+    search_service: SearchService = Depends(get_search_service),
+) -> SearchResponse:
+    return await search_service.search_ocr(request)

@@ -1,3 +1,4 @@
+import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
 from functools import lru_cache
@@ -8,6 +9,8 @@ import numpy as np
 from app.features.errors import FeatureExtractionError
 from app.features.profiles import FeatureProfile, get_profile
 
+logger = logging.getLogger(__name__)
+
 
 def embed_text(feature_profile: str, text: str) -> list[float]:
     """Create a query vector in the same space used for image ingestion."""
@@ -16,6 +19,16 @@ def embed_text(feature_profile: str, text: str) -> list[float]:
 
     profile = get_profile(feature_profile)
     runtime = _load_runtime(profile)
+
+    if profile.api == "jina":
+        # Takes the string itself and returns an array already, so there is no
+        # processor step and nothing to move to the device by hand. Truncation
+        # is the model's own, at 8192 tokens, which nothing here approaches.
+        with runtime.torch.inference_mode():
+            features = runtime.model.encode_text([text])
+        return pool_features(np.asarray(features), profile.dimension)
+
+    _warn_if_truncated(runtime, profile, text)
     inputs = runtime.processor(
         text=[text],
         padding="max_length",
@@ -50,6 +63,11 @@ def encode_images(
 
     for start in range(0, len(images), step):
         batch = images[start : start + step]
+        if profile.api == "jina":
+            with runtime.torch.inference_mode():
+                features = runtime.model.encode_image(_as_pil(batch))
+            chunks.append(np.asarray(features))
+            continue
         if runtime.image_processor is not None:
             inputs = runtime.image_processor(
                 images=list(batch),
@@ -107,6 +125,46 @@ def normalize_one(values: np.ndarray, expected_dimension: int) -> list[float]:
     if norm == 0:
         raise FeatureExtractionError("embedding model returned a zero vector")
     return (values / norm).tolist()
+
+
+def _warn_if_truncated(
+    runtime: "_ModelRuntime", profile: FeatureProfile, text: str
+) -> None:
+    """Say something when the text tower is about to drop the tail of a query.
+
+    `truncation=True` in `embed_text` is silent: a query longer than the
+    tower's context comes back as a perfectly ordinary ranking computed from
+    its first N tokens. SigLIP2 gives 64 of them, and a Vietnamese word with
+    diacritics often costs two or three, so a rewritten query overruns that far
+    sooner than its word count suggests.
+
+    This does not raise. A truncated query still returns useful results, and
+    failing a competition query outright would be worse than answering it from
+    a prefix. It just has to stop being invisible.
+    """
+    tokenizer = getattr(runtime.processor, "tokenizer", None)
+    if tokenizer is None:
+        return
+    length = len(tokenizer(text, truncation=False)["input_ids"])
+    if length > profile.max_text_tokens:
+        logger.warning(
+            "query truncated: %d tokens for '%s', which accepts %d; "
+            "the last %d tokens do not reach the encoder",
+            length,
+            profile.model_id,
+            profile.max_text_tokens,
+            length - profile.max_text_tokens,
+        )
+
+
+def _as_pil(images: Sequence[np.ndarray]) -> list:
+    """Jina's encoder takes PIL images, not the arrays the rest of this uses."""
+    from PIL import Image
+
+    return [
+        image if not isinstance(image, np.ndarray) else Image.fromarray(image)
+        for image in images
+    ]
 
 
 def pool_features(features: np.ndarray, expected_dimension: int) -> list[float]:
@@ -176,6 +234,16 @@ def _load_runtime(profile: FeatureProfile) -> _ModelRuntime:
         dtype = torch.float32
 
     try:
+        if profile.api == "jina":
+            # No AutoProcessor and no image processor: the remote code bundles
+            # its own tokenizer and image transform behind `encode_text` and
+            # `encode_image`.
+            model = AutoModel.from_pretrained(
+                profile.model_id,
+                trust_remote_code=profile.trust_remote_code,
+                dtype=dtype,
+            )
+            return _ModelRuntime(None, model.to(device).eval(), torch, device, dtype)
         processor = AutoProcessor.from_pretrained(profile.model_id)
         # The default (slow, PIL-based) image processor resizes on the CPU and
         # measured 126 img/s against a 174 img/s GPU forward pass — it, not the

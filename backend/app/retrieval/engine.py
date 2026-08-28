@@ -11,7 +11,8 @@ from dataclasses import dataclass, field
 from app.features import sparse, text as text_features
 from app.features.multimodal import embed_text
 from app.features.sparse import SparseVector
-from app.ranking import asr, dedupe, fusion, rerank
+from app.ranking import asr, boost, dedupe, fusion, rerank
+from app.vector_store import collections
 from app.vector_store.client import get_qdrant_client
 from app.vector_store.search import (
     AsrSegment,
@@ -19,6 +20,7 @@ from app.vector_store.search import (
     build_filter,
     search,
     search_asr,
+    search_sparse,
     scroll_frames_for_asr_segments,
 )
 
@@ -70,6 +72,14 @@ class RetrievalConfig:
     # because querying a declared-but-unfilled slot raises rather than degrading;
     # becomes ("ocr",) once on-screen text is upserted.
     frame_sparse_names: tuple[str, ...] = ()
+
+    # On-screen text as a boost over the visual ranking, queried on its own and
+    # folded in on rank. Separate from `frame_sparse_names` on purpose: a slot
+    # listed there is fused by Qdrant server-side, at a weight nobody here
+    # chooses, and counting the same text twice is worse than counting it once
+    # well. When this is on, `ocr` must be left out of `frame_sparse_names`.
+    ocr_boost_enabled: bool = False
+    ocr_boost_weight: float = boost.DEFAULT_OCR_WEIGHT
 
     # Speech overlap. A query also searches the segment collection, and each
     # frame gains a share of the best-scoring segment that covers it in time.
@@ -425,6 +435,55 @@ def retrieve_per_video(
 STAGE_A_SPEECH_TOP_K = 200
 
 
+def search_ocr_channel(
+    sparse_query: SparseVector,
+    top_k: int,
+    config: RetrievalConfig,
+    timings: Timings,
+    video_ids: list[str] | None = None,
+) -> list[ScoredFrame]:
+    """The `ocr` slot on its own, over-fetched like any other frame search."""
+    started = time.perf_counter()
+    try:
+        return search_sparse(
+            get_qdrant_client(),
+            config.frames_collection,
+            sparse_query,
+            using=collections.SPARSE_OCR,
+            limit=dedupe.overfetch_limit(top_k),
+            query_filter=build_filter(video_ids=video_ids),
+        )
+    finally:
+        timings.record("ocr", started)
+
+
+def retrieve_by_ocr(
+    text: str,
+    top_k: int,
+    config: RetrievalConfig,
+    timings: Timings,
+    video_ids: list[str] | None = None,
+) -> list[ScoredFrame]:
+    """On-screen text alone: no image encoder, and no reranker.
+
+    The reranker is left out deliberately rather than forgotten. BLIP ITM
+    scores how well a caption describes a picture; a scoreboard or a chyron is
+    not what the picture is *of*, so putting these hits through it demotes
+    exactly the frames the query asked for.
+    """
+    # Encoded directly rather than through `encode_query_sparse`, which returns
+    # None when `hybrid_enabled` is off. That flag governs whether the *dense*
+    # path fuses a lexical prefetch; it has no bearing on a search that is
+    # lexical from end to end, and honouring it here would make this endpoint
+    # return nothing at all with no explanation.
+    kwargs = {"model_id": config.splade_model} if config.splade_model else {}
+    sparse_query = sparse.encode(text, method=config.sparse_method, **kwargs)
+    if not sparse_query:
+        return []
+    hits = search_ocr_channel(sparse_query, top_k, config, timings, video_ids)
+    return dedupe.dedupe_by_shot(hits, top_k)
+
+
 def _search_and_boost(
     text: str,
     top_k: int,
@@ -441,6 +500,19 @@ def _search_and_boost(
     # switch, since on-screen text is Vietnamese too.
     sparse_query = encode_query_sparse(text, config)
     hits = search_vector(vector, top_k, config, timings, video_ids, sparse_query)
+
+    # Rank fusion, not a weighted sum: a lexical score and a cosine similarity
+    # have no shared scale, so only their orderings can be combined. Runs as a
+    # second query rather than a Qdrant prefetch so the weight is ours — see
+    # `ranking/boost.py` for why that weight is 0.05 and not the 0.5 it shipped
+    # as.
+    if config.ocr_boost_enabled and sparse_query is not None:
+        lexical = search_ocr_channel(
+            sparse_query, top_k, config, timings, video_ids
+        )
+        hits = boost.reciprocal_rank_fuse(
+            hits, lexical, weight=config.ocr_boost_weight
+        )
 
     # Before dedupe on purpose. The bonus is applied per frame, and dedupe keeps
     # the best frame per shot, so boosting first lets speech decide *which*

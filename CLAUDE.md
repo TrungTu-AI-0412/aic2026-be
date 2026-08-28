@@ -219,6 +219,29 @@ across videos with different frame rates. The result carries `events[]` —
 per-event frame, shot, timestamp, score and the runners-up it beat, bounded by
 the neighbouring picks so a swap cannot produce an out-of-order submission.
 
+**On-screen text** (`app/ranking/boost.py`, `engine.retrieve_by_ocr`):
+
+`POST /search/ocr` is the `ocr` sparse slot queried on its own — no image
+encoder, no query rewriting, no reranker. BLIP ITM scores how well a caption
+describes a picture and a chyron is not what the picture is *of*, so reranking
+demotes exactly the frames the query asked for; and rewriting turns prose into
+a caption, which would destroy the one signal being searched. Every row carries
+`ocr_text`, both recognisers' readings joined, as the evidence for the hit.
+
+`OCR_BOOST_ENABLED` folds that same channel over the visual ranking as a second
+query, fused on **rank** rather than magnitude — a lexical score and a cosine
+similarity share no scale. It runs as its own query rather than a Qdrant
+prefetch so the weight is ours; if `ocr` is also listed in `frame_sparse_names`
+the text is counted twice, once at a weight nobody chose.
+
+`OCR_BOOST_WEIGHT` defaults to **0.05**, and that number is measured rather than
+argued. It shipped at 0.5 on the reasoning that half strength would keep
+on-screen text a tie-breaker; on 300 queries against the real index that was
+*worse than turning the channel off* (recall@1 0.140 vs 0.230). The curve is
+monotonic down to 0.05. `app/ranking/boost.py` carries the full table and the
+caveat that the query set is speech-derived, so a set written from on-screen
+text would likely prefer a higher weight.
+
 **Ingestion path** (`app/ingestion/`):
 
 `POST /ingestions` writes a job row to SQLite and detaches a
@@ -287,6 +310,11 @@ types.
 - Parquet manifests remain the rebuild/audit source of truth;
   `docs/data-pipeline.md` is the current state of that data — what is in
   each column, where it came from, and what is still missing.
+- `docs/collections.md` is the same for the *loaded* collections — vector
+  slots, payload, coverage, and which `FEATURE_PROFILE` each one needs. It also
+  records the text tower's token budget per profile, which is what a query
+  rewriter has to respect: SigLIP2 reads 64 tokens and truncates the rest in
+  silence.
 - Manifest paths are constrained to `INGESTION_DATA_ROOT`; keep that check.
 
 ## Review rules
