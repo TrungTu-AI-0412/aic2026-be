@@ -1,195 +1,287 @@
-"""How the engine wires the OCR channel into a query.
+"""`retrieve_per_video`: the second TRAKE stage, without a model or Qdrant.
 
-The searches themselves are covered against a real Qdrant in
-`tests/integration/test_vector_store_search.py`. What is checked here is the
-wiring: which slots each branch queries, how many round trips happen, and
-whether the boost is reachable at all.
+What matters here is not that a search happens but *how* it is split. One
+filtered query per video rather than one query over all of them, because a
+single query returns the global top-N across the videos and starves a correct
+video that ranks low overall. And no shot collapse, because two events can
+happen inside one shot.
 """
+
+from dataclasses import replace
 
 import pytest
 
-from app.features.sparse import SparseVector
 from app.retrieval import engine
 from app.retrieval.engine import RetrievalConfig, Timings
-from app.vector_store import collections
-from app.vector_store.search import ScoredFrame
+from app.vector_store.search import AsrSegment, ScoredFrame
 
 CONFIG = RetrievalConfig(
-    frames_collection="frames-v1",
+    frames_collection="frames-v2",
     feature_profile="clip-b32-v1",
+    asr_collection="asr-v1",
+    asr_weight=0.5,
 )
 
-QUERY = SparseVector(indices=[1, 2], values=[1.0, 1.0])
 
-
-def frame(score: float, shot_id: int, ocr_text: str | None = None) -> ScoredFrame:
+def frame(
+    score: float,
+    video_id: str = "L01_V001",
+    shot_id: int = 0,
+    frame_id: int = 0,
+    pts_sec: float | None = None,
+    shot_start_sec: float | None = None,
+    shot_end_sec: float | None = None,
+) -> ScoredFrame:
     return ScoredFrame(
         score=score,
-        video_id="L01_V001",
+        video_id=video_id,
         shot_id=shot_id,
-        original_frame_id=shot_id * 10,
+        original_frame_id=frame_id,
         start_frame=None,
         end_frame=None,
         path=None,
-        ocr_text=ocr_text,
+        pts_sec=pts_sec,
+        shot_start_sec=shot_start_sec,
+        shot_end_sec=shot_end_sec,
     )
 
 
 @pytest.fixture
-def spy(monkeypatch):
-    """Record every Qdrant call the engine makes, and answer them canned."""
-    dense: list[dict] = []
-    lexical: list[dict] = []
-    hits = {"dense": [], "lexical": []}
+def fake_search(monkeypatch):
+    """Capture what the vector store was asked, and answer per video."""
+    calls: list[tuple[str, list[str] | None, int]] = []
+    hits: dict[str, list[ScoredFrame]] = {}
+    segments: list[AsrSegment] = []
+    encodes: list[str] = []
 
-    def _search(client, collection_name, vector, **kwargs):
-        dense.append({"collection": collection_name, **kwargs})
-        return list(hits["dense"])
+    def _encode_query(text, config, timings):
+        encodes.append(text)
+        return [0.0]
 
-    def _search_sparse(client, collection_name, sparse_query, **kwargs):
-        lexical.append({"collection": collection_name, **kwargs})
-        return list(hits["lexical"])
+    def _search_vector(vector, top_k, config, timings, video_ids=None, sparse=None):
+        calls.append(("frames", video_ids, top_k))
+        return list(hits.get(video_ids[0] if video_ids else "", []))
 
-    monkeypatch.setattr(engine, "get_qdrant_client", lambda: object())
-    monkeypatch.setattr(engine, "search", _search)
-    monkeypatch.setattr(engine, "search_sparse", _search_sparse)
-    return dense, lexical, hits
+    def _search_speech(text, top_k, config, timings, video_ids=None):
+        calls.append(("speech", video_ids, top_k))
+        return list(segments)
 
-
-class TestSparseNames:
-    def test_ocr_is_removed_from_the_server_side_fusion_when_boosted(self):
-        """Double counting is the failure this guards: on-screen text once at
-        RRF's fixed weight inside Qdrant and again at the configured weight on
-        top would make the weight dial mean nothing."""
-        names = engine.fused_sparse_names(CONFIG)
-
-        assert collections.SPARSE_OCR not in names
-        assert collections.SPARSE_SPEECH in names
-        assert collections.SPARSE_CAPTION in names
-
-    def test_all_three_slots_are_fused_when_the_boost_is_off(self):
-        config = RetrievalConfig(
-            frames_collection="frames-v1",
-            feature_profile="clip-b32-v1",
-            ocr_boost_enabled=False,
-        )
-
-        assert engine.fused_sparse_names(config) == collections.SPARSE_VECTOR_NAMES
+    monkeypatch.setattr(engine, "encode_query", _encode_query)
+    monkeypatch.setattr(engine, "encode_query_sparse", lambda text, config: None)
+    monkeypatch.setattr(engine, "search_vector", _search_vector)
+    monkeypatch.setattr(engine, "search_speech", _search_speech)
+    return calls, hits, segments, encodes
 
 
-class TestSearchVector:
-    def test_the_ocr_channel_is_its_own_query(self, spy):
-        dense, lexical, _ = spy
+def test_one_filtered_query_per_video(fake_search):
+    calls, hits, _, encodes = fake_search
+    hits["A"] = [frame(0.9, video_id="A")]
+    hits["B"] = [frame(0.8, video_id="B")]
 
-        engine.search_vector([0.1], 10, CONFIG, Timings(), sparse_query=QUERY)
+    result = engine.retrieve_per_video("run", ["A", "B"], 5, CONFIG, Timings())
 
-        assert len(dense) == 1
-        assert len(lexical) == 1
-        assert lexical[0]["using"] == collections.SPARSE_OCR
-
-    def test_the_ocr_channel_searches_frames_not_clips(self, spy):
-        """A clip point knows a shot's frame range but not which frame inside
-        it carries the text."""
-        _, lexical, _ = spy
-        config = RetrievalConfig(
-            frames_collection="frames-v1",
-            clips_collection="clips-v1",
-            feature_profile="clip-b32-v1",
-        )
-
-        engine.search_vector([0.1], 10, config, Timings(), sparse_query=QUERY)
-
-        assert [call["collection"] for call in lexical] == ["frames-v1"]
-
-    def test_a_dense_only_query_makes_no_lexical_call(self, spy):
-        """Nothing to match on, so the extra round trip would be pure latency."""
-        _, lexical, _ = spy
-
-        engine.search_vector([0.1], 10, CONFIG, Timings(), sparse_query=None)
-
-        assert lexical == []
-
-    def test_the_boost_can_be_turned_off(self, spy):
-        _, lexical, _ = spy
-        config = RetrievalConfig(
-            frames_collection="frames-v1",
-            feature_profile="clip-b32-v1",
-            ocr_boost_enabled=False,
-        )
-
-        engine.search_vector([0.1], 10, config, Timings(), sparse_query=QUERY)
-
-        assert lexical == []
-
-    def test_on_screen_text_lifts_a_shot_the_image_ranked_low(self, spy):
-        _, _, hits = spy
-        hits["dense"] = [frame(0.9, shot_id=1), frame(0.8, shot_id=2)]
-        hits["lexical"] = [frame(11.0, shot_id=2)]
-
-        fused = engine.search_vector(
-            [0.1], 10, CONFIG, Timings(), sparse_query=QUERY
-        )
-
-        assert [hit.shot_id for hit in fused] == [2, 1]
-
-    def test_the_channel_is_timed_separately(self, spy):
-        """It is an extra round trip, and on TRAKE it happens once per event.
-        Folding it into "qdrant" would hide that."""
-        timings = Timings()
-
-        engine.search_vector([0.1], 10, CONFIG, timings, sparse_query=QUERY)
-
-        assert "ocr" in timings.as_dict()
+    assert [call for call in calls if call[0] == "frames"] == [
+        ("frames", ["A"], 5),
+        ("frames", ["B"], 5),
+    ]
+    # One encode for the whole fan-out, not one per video.
+    assert encodes == ["run"]
+    assert sorted(result) == ["A", "B"]
 
 
-class TestRetrieveByOcr:
-    def test_no_image_encoder_runs(self, spy, monkeypatch):
-        def _explode(*args, **kwargs):
-            raise AssertionError("the lexical path must not embed anything")
+def test_a_video_with_no_hits_is_still_a_key(fake_search):
+    _, hits, _, _ = fake_search
+    hits["A"] = [frame(0.9, video_id="A")]
 
-        monkeypatch.setattr(engine, "embed_text", _explode)
+    result = engine.retrieve_per_video("run", ["A", "B"], 5, CONFIG, Timings())
 
-        engine.retrieve_by_ocr("tạm dừng lưu thông", 10, CONFIG, Timings())
+    # The caller drops videos that cannot fill an event; it needs to see the
+    # empty slot rather than a missing key.
+    assert result["B"] == []
 
-    def test_no_reranker_runs(self, spy, monkeypatch):
-        """BLIP ITM scores how well an image depicts a caption. It cannot read
-        a ticker, so letting it reorder these would demote exactly the frames
-        the query asked for."""
-        _, _, hits = spy
-        hits["lexical"] = [frame(9.0, shot_id=1)]
-        monkeypatch.setattr(
-            engine.rerank,
-            "rerank",
-            lambda *a, **k: (_ for _ in ()).throw(AssertionError("reranked")),
-        )
 
-        engine.retrieve_by_ocr("sạt lở", 10, CONFIG, Timings())
+def test_shots_are_not_collapsed(fake_search):
+    _, hits, _, _ = fake_search
+    hits["A"] = [
+        frame(0.9, video_id="A", shot_id=5, frame_id=100),
+        frame(0.8, video_id="A", shot_id=5, frame_id=130),
+    ]
 
-    def test_hits_are_collapsed_to_one_per_shot(self, spy):
-        _, _, hits = spy
-        hits["lexical"] = [frame(9.0, shot_id=1), frame(8.0, shot_id=1)]
+    result = engine.retrieve_per_video("run", ["A"], 5, CONFIG, Timings())
 
-        result = engine.retrieve_by_ocr("x", 10, CONFIG, Timings())
+    assert [hit.representative_frame for hit in result["A"]] == [100, 130]
 
-        assert len(result) == 1
 
-    def test_a_query_with_no_indexable_tokens_makes_no_call(self, spy):
-        """Punctuation alone tokenises to nothing; querying an empty sparse
-        vector would return an arbitrary page of the collection."""
-        _, lexical, _ = spy
+def test_hits_are_score_ordered_and_truncated(fake_search):
+    _, hits, _, _ = fake_search
+    hits["A"] = [
+        frame(0.5, video_id="A", frame_id=1),
+        frame(0.9, video_id="A", frame_id=2),
+        frame(0.7, video_id="A", frame_id=3),
+    ]
 
-        assert engine.retrieve_by_ocr("...", 10, CONFIG, Timings()) == []
-        assert lexical == []
+    result = engine.retrieve_per_video("run", ["A"], 2, CONFIG, Timings())
 
-    def test_the_boost_flag_does_not_disable_the_dedicated_path(self, spy):
-        """The flag governs how the *visual* ranking is assembled. Turning it
-        off must not take /search/ocr down with it."""
-        _, _, hits = spy
-        hits["lexical"] = [frame(9.0, shot_id=1)]
-        config = RetrievalConfig(
-            frames_collection="frames-v1",
-            feature_profile="clip-b32-v1",
-            ocr_boost_enabled=False,
-        )
+    assert [hit.representative_frame for hit in result["A"]] == [2, 3]
 
-        assert engine.retrieve_by_ocr("sạt lở", 10, config, Timings())
+
+def test_speech_is_searched_once_for_the_whole_candidate_set(fake_search):
+    calls, hits, segments, _ = fake_search
+    hits["A"] = [frame(0.5, video_id="A", pts_sec=5.0)]
+    hits["B"] = [frame(0.5, video_id="B", pts_sec=5.0)]
+    segments.append(AsrSegment(score=1.0, video_id="A", start_sec=0.0, end_sec=10.0))
+    segments.append(AsrSegment(score=0.0, video_id="B", start_sec=0.0, end_sec=10.0))
+
+    result = engine.retrieve_per_video("run", ["A", "B"], 5, CONFIG, Timings())
+
+    assert [call for call in calls if call[0] == "speech"] == [
+        ("speech", ["A", "B"], 5)
+    ]
+    # Segment scores are min-max normalised over the list they arrive in, so
+    # boosting each video from its own list would give both a 1.0 bonus and
+    # make the two videos' scores incomparable - which is the one thing the
+    # caller ranks on.
+    assert result["A"][0].score == pytest.approx(1.0)
+    assert result["B"][0].score == pytest.approx(0.5)
+
+
+def test_no_videos_means_no_queries(fake_search):
+    calls, _, _, encodes = fake_search
+
+    assert engine.retrieve_per_video("run", [], 5, CONFIG, Timings()) == {}
+    assert calls == []
+    assert encodes == []
+
+
+def test_speech_searches_the_original_while_the_image_space_gets_the_rewrite(
+    monkeypatch,
+):
+    """Rewriting is for the image space only.
+
+    The rewrite is English, because SigLIP2 and the reranker are; the speech
+    collection holds Vietnamese transcripts and is searched dense *and* by term
+    overlap, so handing it the translation would drop the lexical half to
+    nothing. Both entry points have to route the two strings the same way.
+    """
+    encoded: list[str] = []
+    spoken: list[str] = []
+
+    def _encode_query(text, config, timings):
+        encoded.append(text)
+        return [0.0]
+
+    def _search_speech(text, top_k, config, timings, video_ids=None):
+        spoken.append(text)
+        return []
+
+    monkeypatch.setattr(engine, "encode_query", _encode_query)
+    monkeypatch.setattr(engine, "encode_query_sparse", lambda text, config: None)
+    monkeypatch.setattr(
+        engine, "search_vector", lambda *args, **kwargs: [frame(0.5)]
+    )
+    monkeypatch.setattr(engine, "search_speech", _search_speech)
+
+    # `retrieve` reranks by default, which would load a cross-encoder.
+    config = replace(CONFIG, rerank_enabled=False)
+    engine.retrieve(
+        "a man running", 5, config, Timings(), speech_text="người đàn ông đang chạy"
+    )
+    engine.retrieve_per_video(
+        "a man running",
+        ["A"],
+        5,
+        config,
+        Timings(),
+        speech_text="người đàn ông đang chạy",
+    )
+
+    assert encoded == ["a man running", "a man running"]
+    assert spoken == ["người đàn ông đang chạy", "người đàn ông đang chạy"]
+
+
+def test_video_scores_keep_every_video_the_query_names(fake_search):
+    """Stage A of TRAKE wants breadth, not a page of results.
+
+    `retrieve` would collapse this list to one hit per shot and cut it to
+    `top_k`, which is how the top 400 shots of a query end up naming 28 videos
+    for a 100-video pool. Here nothing is dropped. Reranking must not run
+    either: CONFIG leaves it enabled and no model is loaded in this test, so a
+    result at all is the assertion.
+    """
+    _, hits, _, _ = fake_search
+    hits[""] = [
+        frame(0.9, video_id="A", shot_id=0, frame_id=0),
+        frame(0.5, video_id="A", shot_id=0, frame_id=1),
+        frame(0.7, video_id="B", shot_id=3, frame_id=2),
+        frame(0.2, video_id="C", shot_id=9, frame_id=3),
+    ]
+
+    scores = engine.retrieve_video_scores("run", 1, CONFIG, Timings())
+
+    assert scores == {"A": 0.9, "B": 0.7, "C": 0.2}
+
+
+def test_asr_segments_map_to_the_nearest_midpoint_frame_and_dedupe_by_shot():
+    frames = [
+        frame(
+            0.1,
+            shot_id=7,
+            frame_id=100,
+            pts_sec=4.0,
+            shot_start_sec=0.0,
+            shot_end_sec=10.0,
+        ),
+        frame(
+            0.1,
+            shot_id=7,
+            frame_id=120,
+            pts_sec=6.0,
+            shot_start_sec=0.0,
+            shot_end_sec=10.0,
+        ),
+    ]
+    segments = [
+        AsrSegment(
+            score=0.4,
+            video_id="L01_V001",
+            segment=1,
+            start_sec=4.0,
+            end_sec=6.0,
+            text="lower score",
+        ),
+        AsrSegment(
+            score=0.9,
+            video_id="L01_V001",
+            segment=2,
+            start_sec=4.0,
+            end_sec=6.0,
+            text="winning transcript",
+        ),
+    ]
+
+    hits = engine.map_asr_segments_to_frames(segments, frames, top_k=10)
+
+    assert len(hits) == 1
+    # Both frames are one second from the midpoint, so the lower original id
+    # is the deterministic tie-break.
+    assert hits[0].frame.representative_frame == 100
+    assert hits[0].segment.text == "winning transcript"
+
+
+def test_asr_mapping_skips_frames_without_temporal_coordinates():
+    segment = AsrSegment(
+        score=1.0,
+        video_id="L01_V001",
+        start_sec=1.0,
+        end_sec=2.0,
+    )
+    invalid = frame(0.1, frame_id=0, pts_sec=None)
+
+    assert engine.map_asr_segments_to_frames([segment], [invalid], 5) == []
+
+
+def test_asr_only_requires_an_enabled_collection():
+    config = replace(CONFIG, asr_collection=None)
+
+    with pytest.raises(engine.AsrOnlyUnavailableError):
+        engine.search_asr_only("lời thoại", 5, config, Timings())

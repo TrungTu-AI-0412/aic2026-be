@@ -74,7 +74,8 @@ class SqliteIngestionService:
         except UnknownFeatureProfileError as exc:
             raise UnsupportedFeatureProfileError(str(exc)) from exc
 
-        manifest_path = Path(request.manifest_path).resolve()
+        # Relative paths resolve against the data root, not the API process CWD.
+        manifest_path = (self._data_root / request.manifest_path).resolve()
         if not manifest_path.is_relative_to(self._data_root):
             raise ManifestPathNotAllowedError(
                 f"manifest_path '{request.manifest_path}' is outside "

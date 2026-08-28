@@ -2,17 +2,44 @@ name: aic2026
 
 services:
   qdrant:
-    # Keep this pinned. Collection snapshots are only portable within a
-    # compatible Qdrant minor version; upgrade image and restore procedure
-    # together, never by silently following `latest`.
     image: qdrant/qdrant:v1.12.1
     container_name: aic2026-qdrant
     restart: unless-stopped
     ports:
-      - "${QDRANT_BIND_ADDRESS:-127.0.0.1}:${QDRANT_HTTP_PORT:-6333}:6333"
-      - "${QDRANT_BIND_ADDRESS:-127.0.0.1}:${QDRANT_GRPC_PORT:-6334}:6334"
+      # Mở ra ngoài host nếu cần xem dashboard Qdrant
+      - "6333:6333"
+      - "6334:6334"
     environment:
-      QDRANT__SERVICE__API_KEY: "${QDRANT_API_KEY:?Set QDRANT_API_KEY in .env}"
+      QDRANT__SERVICE__API_KEY: "${QDRANT_API_KEY}"
     volumes:
       - ./data/qdrant/storage:/qdrant/storage
       - ./data/qdrant/snapshots:/qdrant/snapshots
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: aic2026-backend
+    restart: unless-stopped
+    depends_on:
+      - qdrant
+    ports:
+      # Map cổng 8000 của container ra tất cả các IP trên host
+      - "0.0.0.0:8000:8000"
+    environment:
+      # Trỏ backend đến service qdrant trong mạng Docker
+      - QDRANT_URL=http://qdrant:6333
+      - QDRANT_API_KEY=${QDRANT_API_KEY}
+    volumes:
+      # Mount thư mục data và cache model để không phải tải lại
+      - ./data:/home/ubuntu/tung/aic2026-be/data
+      - ./ingestion.db:/home/ubuntu/tung/aic2026-be/ingestion.db
+      - ~/.cache/huggingface:/root/.cache/huggingface
+    # Cấu hình GPU Passthrough (Yêu cầu NVIDIA Container Toolkit)
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

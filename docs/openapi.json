@@ -83,6 +83,9 @@
               }
             }
           },
+          "503": {
+            "description": "ASR-only retrieval is unavailable"
+          },
           "422": {
             "description": "Validation Error",
             "content": {
@@ -123,6 +126,54 @@
                 }
               }
             }
+          },
+          "503": {
+            "description": "ASR-only retrieval is unavailable"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/search/decompose": {
+      "post": {
+        "tags": [
+          "Search"
+        ],
+        "summary": "Decompose",
+        "description": "Split one pasted query into the overview and events, for review.\n\nRetrieval does not run here. The operator reads what came back, fixes what\nthe model got wrong, and posts it to `/search/trake` or `/search/kis`,\nwhich then search those forms verbatim and make no LLM call of their own.",
+        "operationId": "decompose_api_v1_search_decompose_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DecomposeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DecomposeResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The query could not be decomposed"
           },
           "422": {
             "description": "Validation Error",
@@ -253,6 +304,208 @@
               "application/json": {
                 "schema": {}
               }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/videos/{video_id}/frames/{frame_id}/context": {
+      "get": {
+        "tags": [
+          "Media"
+        ],
+        "summary": "Get Frame Context",
+        "description": "Metadata for one keyframe plus its neighbouring keyframes.\n\nOne request per verify panel: the neighbour thumbnails are then plain\n`/frames/{frame_id}` reads and the clip preview is `/stream#t=pts_sec`.",
+        "operationId": "get_frame_context_api_v1_videos__video_id__frames__frame_id__context_get",
+        "parameters": [
+          {
+            "name": "video_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Video Id"
+            }
+          },
+          {
+            "name": "frame_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Frame Id"
+            }
+          },
+          {
+            "name": "radius",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 25,
+              "minimum": 0,
+              "description": "Neighbouring keyframes each side.",
+              "default": 5,
+              "title": "Radius"
+            },
+            "description": "Neighbouring keyframes each side."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FrameContext"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/videos/{video_id}/stream": {
+      "get": {
+        "tags": [
+          "Media"
+        ],
+        "summary": "Stream Video",
+        "description": "Stream the source video for in-place playback.\n\nSeek on the client: `<video src=\".../stream#t=12.5\">`. FileResponse honours\nRange requests, so the browser pulls only the bytes around that timestamp\ninstead of the file, and nothing is decoded or re-encoded server side.",
+        "operationId": "stream_video_api_v1_videos__video_id__stream_get",
+        "parameters": [
+          {
+            "name": "video_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Video Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/videos/{video_id}/timeline": {
+      "get": {
+        "tags": [
+          "Media"
+        ],
+        "summary": "Get Video Timeline",
+        "description": "Metadata and sampled-frame markers for the full verification studio.",
+        "operationId": "get_video_timeline_api_v1_videos__video_id__timeline_get",
+        "parameters": [
+          {
+            "name": "video_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Video Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VideoTimeline"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/videos/{video_id}/source-frames/{frame_id}": {
+      "get": {
+        "tags": [
+          "Media"
+        ],
+        "summary": "Get Source Frame",
+        "description": "Decode one exact original-video frame for submission verification.",
+        "operationId": "get_source_frame_api_v1_videos__video_id__source_frames__frame_id__get",
+        "parameters": [
+          {
+            "name": "video_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Video Id"
+            }
+          },
+          {
+            "name": "frame_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "title": "Frame Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              },
+              "image/jpeg": {}
             }
           },
           "422": {
@@ -541,6 +794,40 @@
   },
   "components": {
     "schemas": {
+      "AsrEvidence": {
+        "properties": {
+          "segment": {
+            "type": "integer",
+            "title": "Segment"
+          },
+          "text": {
+            "type": "string",
+            "title": "Text"
+          },
+          "start_sec": {
+            "type": "number",
+            "title": "Start Sec"
+          },
+          "end_sec": {
+            "type": "number",
+            "title": "End Sec"
+          },
+          "score": {
+            "type": "number",
+            "title": "Score"
+          }
+        },
+        "type": "object",
+        "required": [
+          "segment",
+          "text",
+          "start_sec",
+          "end_sec",
+          "score"
+        ],
+        "title": "AsrEvidence",
+        "description": "The speech segment that produced an ASR-only frame result."
+      },
       "CreateIngestionJobRequest": {
         "properties": {
           "entity": {
@@ -592,6 +879,148 @@
           "collection_name"
         ],
         "title": "CreateIngestionJobResponse"
+      },
+      "DecomposeRequest": {
+        "properties": {
+          "query": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Query"
+          },
+          "max_events": {
+            "type": "integer",
+            "maximum": 12.0,
+            "minimum": 1.0,
+            "title": "Max Events",
+            "description": "Cap on events for a query that does not enumerate its own. Ignored when the query carries explicit `E1:` markers - those are split deterministically and the competition's own count is kept.",
+            "default": 6
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "query"
+        ],
+        "title": "DecomposeRequest"
+      },
+      "DecomposeResponse": {
+        "properties": {
+          "source": {
+            "type": "string",
+            "enum": [
+              "markers",
+              "llm"
+            ],
+            "title": "Source"
+          },
+          "overview": {
+            "$ref": "#/components/schemas/QueryForms"
+          },
+          "events": {
+            "items": {
+              "$ref": "#/components/schemas/QueryForms"
+            },
+            "type": "array",
+            "title": "Events"
+          },
+          "latency_ms": {
+            "additionalProperties": {
+              "type": "number"
+            },
+            "type": "object",
+            "title": "Latency Ms"
+          }
+        },
+        "type": "object",
+        "required": [
+          "source",
+          "overview",
+          "events"
+        ],
+        "title": "DecomposeResponse",
+        "description": "What the operator reviews before searching.\n\n`source` says how the split happened: `markers` when the query enumerated\nits events (a regex, no model, so it cannot renumber or merge them) and\n`llm` when they were inferred from prose."
+      },
+      "EventCandidate": {
+        "properties": {
+          "frame_id": {
+            "type": "integer",
+            "title": "Frame Id"
+          },
+          "shot_id": {
+            "type": "integer",
+            "title": "Shot Id"
+          },
+          "pts_sec": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pts Sec"
+          },
+          "score": {
+            "type": "number",
+            "title": "Score"
+          }
+        },
+        "type": "object",
+        "required": [
+          "frame_id",
+          "shot_id",
+          "score"
+        ],
+        "title": "EventCandidate",
+        "description": "One frame proposed for one TRAKE event."
+      },
+      "EventHit": {
+        "properties": {
+          "frame_id": {
+            "type": "integer",
+            "title": "Frame Id"
+          },
+          "shot_id": {
+            "type": "integer",
+            "title": "Shot Id"
+          },
+          "pts_sec": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pts Sec"
+          },
+          "score": {
+            "type": "number",
+            "title": "Score"
+          },
+          "event_index": {
+            "type": "integer",
+            "title": "Event Index"
+          },
+          "alternates": {
+            "items": {
+              "$ref": "#/components/schemas/EventCandidate"
+            },
+            "type": "array",
+            "title": "Alternates"
+          }
+        },
+        "type": "object",
+        "required": [
+          "frame_id",
+          "shot_id",
+          "score",
+          "event_index"
+        ],
+        "title": "EventHit",
+        "description": "The frame chosen for an event, plus the ones it beat.\n\n`alternates` are bounded by the neighbouring events' chosen frames, so an\noperator swapping one in cannot produce an out-of-order submission."
       },
       "ExportFormat": {
         "type": "string",
@@ -699,6 +1128,100 @@
         ],
         "title": "FeatureProfileOption"
       },
+      "FrameContext": {
+        "properties": {
+          "video_id": {
+            "type": "string",
+            "title": "Video Id"
+          },
+          "frame_id": {
+            "type": "integer",
+            "title": "Frame Id"
+          },
+          "keyframe_n": {
+            "type": "integer",
+            "title": "Keyframe N"
+          },
+          "pts_sec": {
+            "type": "number",
+            "title": "Pts Sec"
+          },
+          "shot_id": {
+            "type": "integer",
+            "title": "Shot Id"
+          },
+          "shot_start_sec": {
+            "type": "number",
+            "title": "Shot Start Sec"
+          },
+          "shot_end_sec": {
+            "type": "number",
+            "title": "Shot End Sec"
+          },
+          "shot_start_frame": {
+            "type": "integer",
+            "title": "Shot Start Frame"
+          },
+          "shot_end_frame": {
+            "type": "integer",
+            "title": "Shot End Frame"
+          },
+          "fps": {
+            "type": "number",
+            "title": "Fps"
+          },
+          "duration_sec": {
+            "type": "number",
+            "title": "Duration Sec"
+          },
+          "width": {
+            "type": "integer",
+            "title": "Width"
+          },
+          "height": {
+            "type": "integer",
+            "title": "Height"
+          },
+          "youtube_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Youtube Id",
+            "description": "YouTube id of the source upload, for previewing at `pts_sec` via an embed instead of range-reading the local mp4. None when `media-info/<video_id>.json` is missing a watch URL."
+          },
+          "neighbours": {
+            "items": {
+              "$ref": "#/components/schemas/NeighbourFrame"
+            },
+            "type": "array",
+            "title": "Neighbours"
+          }
+        },
+        "type": "object",
+        "required": [
+          "video_id",
+          "frame_id",
+          "keyframe_n",
+          "pts_sec",
+          "shot_id",
+          "shot_start_sec",
+          "shot_end_sec",
+          "shot_start_frame",
+          "shot_end_frame",
+          "fps",
+          "duration_sec",
+          "width",
+          "height",
+          "neighbours"
+        ],
+        "title": "FrameContext",
+        "description": "Everything the verify panel shows about one retrieved keyframe.\n\n`frame_id` is `original_frame_id` \u2014 what a submission reports. It is not a\nkey: two keyframes of the same video can share one, so `keyframe_n` is the\nidentity and the first match wins here."
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -716,7 +1239,8 @@
         "type": "string",
         "enum": [
           "frames",
-          "clips"
+          "clips",
+          "asr_segments"
         ],
         "title": "IngestionEntity"
       },
@@ -888,6 +1412,104 @@
       },
       "KisSearchRequest": {
         "properties": {
+          "max_gap_sec": {
+            "anyOf": [
+              {
+                "type": "number",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Gap Sec",
+            "description": "Widest gap in seconds between consecutive events. 0 disables the check; None uses the configured default."
+          },
+          "gap_weight": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 1.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gap Weight",
+            "description": "What the time gap between consecutive events costs, as a share of the sequence score - the events of one query describe a single continuous action, so a tighter chain is the better answer. 0 disables the penalty; None uses the configured default."
+          },
+          "asr_enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Asr Enabled",
+            "description": "Toggle the ASR overlap bonus for this query."
+          },
+          "asr_weight": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 1.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Asr Weight",
+            "description": "Share of a frame's score the best overlapping segment adds."
+          },
+          "asr_dense_weight": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 1.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Asr Dense Weight",
+            "description": "Weight of the dense (semantic) half of the speech search."
+          },
+          "asr_sparse_weight": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 1.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Asr Sparse Weight",
+            "description": "Weight of the lexical (BM25) half of the speech search."
+          },
+          "retrieval_mode": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "visual",
+                  "visual_asr",
+                  "asr_only"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Retrieval Mode",
+            "description": "Explicit retrieval source. Omit to keep the configured default and legacy asr_enabled behaviour. ASR-only is supported by KIS/Q&A only."
+          },
           "task": {
             "type": "string",
             "const": "kis",
@@ -896,7 +1518,8 @@
           "description": {
             "type": "string",
             "minLength": 1,
-            "title": "Description"
+            "title": "Description",
+            "description": "The query as typed. Ignored for retrieval when `events` is given, where the decomposed forms are searched instead."
           },
           "top_k": {
             "type": "integer",
@@ -904,6 +1527,44 @@
             "minimum": 1.0,
             "title": "Top K",
             "default": 100
+          },
+          "overview": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "$ref": "#/components/schemas/QueryForms"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Overview",
+            "description": "Temporal KIS only. Must be given with `events`."
+          },
+          "events": {
+            "anyOf": [
+              {
+                "items": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "$ref": "#/components/schemas/QueryForms"
+                    }
+                  ]
+                },
+                "type": "array",
+                "minItems": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Events",
+            "description": "Temporal KIS only: the moments the description walks through, in order. Omit for an ordinary single-frame KIS search."
           }
         },
         "type": "object",
@@ -911,7 +1572,42 @@
           "task",
           "description"
         ],
-        "title": "KisSearchRequest"
+        "title": "KisSearchRequest",
+        "description": "One frame per row, found either directly or through a sequence.\n\n`overview` and `events` turn this into a *temporal* KIS: a description that\nwalks through phases (\"ph\u00e2n c\u1ea3nh ti\u1ebfp theo...\") is decomposed by\n`/search/decompose`, each moment votes on the video independently, and the\nrow still reports one frame - the highest-scoring event of the aligned\nchain. Averaging those phases into a single 40-word caption is what this\nreplaces. The operator opts in; nothing is auto-detected."
+      },
+      "NeighbourFrame": {
+        "properties": {
+          "frame_id": {
+            "type": "integer",
+            "title": "Frame Id"
+          },
+          "keyframe_n": {
+            "type": "integer",
+            "title": "Keyframe N"
+          },
+          "pts_sec": {
+            "type": "number",
+            "title": "Pts Sec"
+          },
+          "shot_id": {
+            "type": "integer",
+            "title": "Shot Id"
+          },
+          "is_same_shot": {
+            "type": "boolean",
+            "title": "Is Same Shot"
+          }
+        },
+        "type": "object",
+        "required": [
+          "frame_id",
+          "keyframe_n",
+          "pts_sec",
+          "shot_id",
+          "is_same_shot"
+        ],
+        "title": "NeighbourFrame",
+        "description": "A keyframe next to the one being verified, ordered by frame index."
       },
       "OcrSearchRequest": {
         "properties": {
@@ -923,7 +1619,8 @@
           "text": {
             "type": "string",
             "minLength": 1,
-            "title": "Text"
+            "title": "Text",
+            "description": "The on-screen text to look for, as it appears on screen."
           },
           "top_k": {
             "type": "integer",
@@ -944,16 +1641,18 @@
                 "type": "null"
               }
             ],
-            "title": "Video Ids"
+            "title": "Video Ids",
+            "description": "Restrict to these videos. None searches the collection."
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "task",
           "text"
         ],
         "title": "OcrSearchRequest",
-        "description": "Find a shot by the text printed on it, not by what it looks like.\n\nSeparate from KIS because the two are answered differently: `text` is\nmatched literally against what the recognisers read off the frame, no\nimage embedding is computed, and no reranker runs. Use it when the query\nis a name, a date, a channel bug or a headline - things the image model\nhas no representation of.\n\n`video_ids` narrows the search to videos an earlier visual search already\nsurfaced, which is the usual way the two get used together."
+        "description": "The on-screen text channel on its own, with nothing layered over it.\n\nNo image encoder and no reranker. BLIP ITM scores how well a caption\ndescribes a picture, and a ticker, a scoreboard or a chyron is not what the\npicture is *of* \u2014 asking it to judge these hits demotes exactly the frames\nthe query asked for. So this path stops at the lexical score.\n\nThe query is not rewritten either. An operator reaching for this endpoint\nhas read the text off the screen and is typing it back verbatim; a\nrewriter's job is to turn prose into a caption, which here would corrupt\nthe one signal being searched."
       },
       "QaCandidate": {
         "properties": {
@@ -986,10 +1685,82 @@
           "frame_id",
           "answer"
         ],
-        "title": "QaCandidate"
+        "title": "QaCandidate",
+        "description": "A frame plus the answer the operator read off it.\n\n`answer` is human input - no VQA model produces it - so it arrives with\nwhatever a paste carried."
       },
       "QaSearchRequest": {
         "properties": {
+          "asr_enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Asr Enabled",
+            "description": "Toggle the ASR overlap bonus for this query."
+          },
+          "asr_weight": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 1.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Asr Weight",
+            "description": "Share of a frame's score the best overlapping segment adds."
+          },
+          "asr_dense_weight": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 1.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Asr Dense Weight",
+            "description": "Weight of the dense (semantic) half of the speech search."
+          },
+          "asr_sparse_weight": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 1.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Asr Sparse Weight",
+            "description": "Weight of the lexical (BM25) half of the speech search."
+          },
+          "retrieval_mode": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "visual",
+                  "visual_asr",
+                  "asr_only"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Retrieval Mode",
+            "description": "Explicit retrieval source. Omit to keep the configured default and legacy asr_enabled behaviour. ASR-only is supported by KIS/Q&A only."
+          },
           "task": {
             "type": "string",
             "const": "qa",
@@ -999,11 +1770,6 @@
             "type": "string",
             "minLength": 1,
             "title": "Description"
-          },
-          "question": {
-            "type": "string",
-            "minLength": 1,
-            "title": "Question"
           },
           "top_k": {
             "type": "integer",
@@ -1016,10 +1782,47 @@
         "type": "object",
         "required": [
           "task",
-          "description",
-          "question"
+          "description"
         ],
-        "title": "QaSearchRequest"
+        "title": "QaSearchRequest",
+        "description": "Same retrieval as KIS: find the moment, the operator reads it.\n\nThere is no `question` field. It was never encoded \u2014 SigLIP2 scores a\ncaption against an image and \"what colour is the bike?\" describes no\nimage \u2014 and no VQA model is wired in, so nothing downstream could use it.\nThe operator answers off the frame and types it into the submission."
+      },
+      "QueryForms": {
+        "properties": {
+          "original": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Original"
+          },
+          "vision": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Vision"
+          },
+          "speech": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Speech"
+          }
+        },
+        "type": "object",
+        "required": [
+          "speech"
+        ],
+        "title": "QueryForms",
+        "description": "One part of a decomposed query, in the forms retrieval needs.\n\nProduced by `POST /search/decompose` and accepted back by the search\nendpoints, so an operator edits what the model wrote and the search uses it\nverbatim - a search given these does no LLM work at all.\n\n`original` is the span of the operator's query this was cut from, and is\nnull for an overview the model synthesised (the query never stated one).\n`vision` is null when the caption call failed: retrieval then puts `speech`\nthrough the image tower, which ranks worse than a caption but is not\nnothing."
       },
       "SearchResponse": {
         "properties": {
@@ -1036,6 +1839,46 @@
               "ocr"
             ],
             "title": "Task"
+          },
+          "effective_retrieval_mode": {
+            "type": "string",
+            "enum": [
+              "visual",
+              "visual_asr",
+              "asr_only"
+            ],
+            "title": "Effective Retrieval Mode",
+            "default": "visual"
+          },
+          "rewritten_queries": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rewritten Queries",
+            "description": "The English forms the rewriting step encoded against the image space: [description] for KIS/QA, [overview, *events] for TRAKE. See cleaned_queries for the speech form. Null when rewriting was off or failed, in which case the query was searched exactly as typed."
+          },
+          "cleaned_queries": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cleaned Queries",
+            "description": "The original-language forms with retrieval instructions removed, searched against speech transcripts. Null when rewriting was off or failed."
           },
           "results": {
             "items": {
@@ -1082,20 +1925,43 @@
             "type": "array",
             "title": "Frame Ids"
           },
-          "answer": {
+          "score": {
+            "type": "number",
+            "title": "Score"
+          },
+          "stage_a": {
             "anyOf": [
               {
-                "type": "string"
+                "$ref": "#/components/schemas/StageAScore"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "events": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/EventHit"
+                },
+                "type": "array"
               },
               {
                 "type": "null"
               }
             ],
-            "title": "Answer"
+            "title": "Events"
           },
-          "score": {
-            "type": "number",
-            "title": "Score"
+          "asr_evidence": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AsrEvidence"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "ocr_text": {
             "anyOf": [
@@ -1145,6 +2011,28 @@
           "model_config_name": {
             "type": "string",
             "title": "Model Config Name"
+          },
+          "asr_collection": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Asr Collection"
+          },
+          "asr_model_config_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Asr Model Config Name"
           }
         },
         "type": "object",
@@ -1152,6 +2040,77 @@
           "model_config_name"
         ],
         "title": "SearchVersions"
+      },
+      "StageAScore": {
+        "properties": {
+          "rank": {
+            "type": "integer",
+            "title": "Rank"
+          },
+          "score": {
+            "type": "number",
+            "title": "Score"
+          },
+          "overview_score": {
+            "type": "number",
+            "title": "Overview Score"
+          },
+          "event_scores": {
+            "items": {
+              "type": "number"
+            },
+            "type": "array",
+            "title": "Event Scores"
+          }
+        },
+        "type": "object",
+        "required": [
+          "rank",
+          "score",
+          "overview_score",
+          "event_scores"
+        ],
+        "title": "StageAScore",
+        "description": "Why the video-selection stage kept this video.\n\nThe composite alone cannot answer the question an operator actually asks -\ndid this video win on the overview and lose every event, or the reverse -\nso the parts it is made of are reported next to it. `event_scores` is the\nbest global score each event reached in this video, 0.0 where the event\nreached it nowhere, in request order."
+      },
+      "TimelineKeyframe": {
+        "properties": {
+          "frame_id": {
+            "type": "integer",
+            "title": "Frame Id"
+          },
+          "keyframe_n": {
+            "type": "integer",
+            "title": "Keyframe N"
+          },
+          "pts_sec": {
+            "type": "number",
+            "title": "Pts Sec"
+          },
+          "shot_id": {
+            "type": "integer",
+            "title": "Shot Id"
+          },
+          "shot_start_sec": {
+            "type": "number",
+            "title": "Shot Start Sec"
+          },
+          "shot_end_sec": {
+            "type": "number",
+            "title": "Shot End Sec"
+          }
+        },
+        "type": "object",
+        "required": [
+          "frame_id",
+          "keyframe_n",
+          "pts_sec",
+          "shot_id",
+          "shot_start_sec",
+          "shot_end_sec"
+        ],
+        "title": "TimelineKeyframe",
+        "description": "One sampled frame exposed on the full-video verification timeline."
       },
       "TrakeCandidate": {
         "properties": {
@@ -1185,19 +2144,113 @@
       },
       "TrakeSearchRequest": {
         "properties": {
+          "max_gap_sec": {
+            "anyOf": [
+              {
+                "type": "number",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Gap Sec",
+            "description": "Widest gap in seconds between consecutive events. 0 disables the check; None uses the configured default."
+          },
+          "gap_weight": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 1.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gap Weight",
+            "description": "What the time gap between consecutive events costs, as a share of the sequence score - the events of one query describe a single continuous action, so a tighter chain is the better answer. 0 disables the penalty; None uses the configured default."
+          },
+          "asr_enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Asr Enabled",
+            "description": "Toggle the ASR overlap bonus for this query."
+          },
+          "asr_weight": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 1.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Asr Weight",
+            "description": "Share of a frame's score the best overlapping segment adds."
+          },
+          "asr_dense_weight": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 1.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Asr Dense Weight",
+            "description": "Weight of the dense (semantic) half of the speech search."
+          },
+          "asr_sparse_weight": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 1.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Asr Sparse Weight",
+            "description": "Weight of the lexical (BM25) half of the speech search."
+          },
           "task": {
             "type": "string",
             "const": "trake",
             "title": "Task"
           },
           "overview": {
-            "type": "string",
-            "minLength": 1,
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "$ref": "#/components/schemas/QueryForms"
+              }
+            ],
             "title": "Overview"
           },
           "events": {
             "items": {
-              "type": "string"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "$ref": "#/components/schemas/QueryForms"
+                }
+              ]
             },
             "type": "array",
             "minItems": 1,
@@ -1208,9 +2261,26 @@
             "maximum": 100.0,
             "minimum": 1.0,
             "title": "Top K",
+            "description": "Sequences to return. Effectively capped by the number of candidate videos the overview stage keeps.",
             "default": 100
+          },
+          "video_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Video Ids",
+            "description": "Search only these videos, skipping video selection entirely. For an operator who already found the video with a KIS query."
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "task",
@@ -1242,6 +2312,13 @@
           "type": {
             "type": "string",
             "title": "Error Type"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "ctx": {
+            "type": "object",
+            "title": "Context"
           }
         },
         "type": "object",
@@ -1251,6 +2328,92 @@
           "type"
         ],
         "title": "ValidationError"
+      },
+      "VideoTimeline": {
+        "properties": {
+          "video_id": {
+            "type": "string",
+            "title": "Video Id"
+          },
+          "fps_num": {
+            "type": "integer",
+            "title": "Fps Num"
+          },
+          "fps_den": {
+            "type": "integer",
+            "title": "Fps Den"
+          },
+          "frame_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Frame Count"
+          },
+          "duration_sec": {
+            "type": "number",
+            "title": "Duration Sec"
+          },
+          "width": {
+            "type": "integer",
+            "title": "Width"
+          },
+          "height": {
+            "type": "integer",
+            "title": "Height"
+          },
+          "rotation": {
+            "type": "integer",
+            "title": "Rotation"
+          },
+          "is_vfr": {
+            "type": "boolean",
+            "title": "Is Vfr"
+          },
+          "codec": {
+            "type": "string",
+            "title": "Codec"
+          },
+          "youtube_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Youtube Id",
+            "description": "YouTube id of the source upload, or None."
+          },
+          "keyframes": {
+            "items": {
+              "$ref": "#/components/schemas/TimelineKeyframe"
+            },
+            "type": "array",
+            "title": "Keyframes"
+          }
+        },
+        "type": "object",
+        "required": [
+          "video_id",
+          "fps_num",
+          "fps_den",
+          "frame_count",
+          "duration_sec",
+          "width",
+          "height",
+          "rotation",
+          "is_vfr",
+          "codec",
+          "keyframes"
+        ],
+        "title": "VideoTimeline",
+        "description": "Source-video metadata plus every sampled frame available for scanning."
       }
     }
   }

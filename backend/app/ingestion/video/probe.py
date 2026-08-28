@@ -20,6 +20,7 @@ import av
 from av.sidedata.sidedata import Type as SideDataType
 from tqdm import tqdm
 
+from app.ingestion.video import parallel
 from app.ingestion.manifest import (
     VIDEO_ARROW_SCHEMA,
     VideoManifestRow,
@@ -78,6 +79,7 @@ def probe_directory(
     out_path: str,
     resume: bool = False,
     limit: int | None = None,
+    workers: int | None = None,
 ) -> int:
     """Probe every video under `source_dir` into a manifest.
 
@@ -101,10 +103,20 @@ def probe_directory(
     done = existing_video_ids(out_path) if resume else set()
     pending = [path for path in videos if path.stem not in done][:limit]
 
-    rows = [
-        probe_video(path)
-        for path in tqdm(pending, desc="probe", unit="video")
-    ]
+    # Probing only reads container headers, so it is IO-bound rather than
+    # decode-bound and finishes in minutes even over 873 files. Parallelised
+    # anyway because it is free to do so, and the flag stays consistent with
+    # the two stages that genuinely need it.
+    # Results arrive as workers finish, so they are put back into `pending`
+    # order before writing. The manifest is the rebuild and audit record, and a
+    # row order that changed with worker scheduling would make two runs over the
+    # same directory produce different files for no reason.
+    probed = dict(
+        parallel.map_videos(
+            probe_video, pending, parallel.resolve_workers(workers), desc="probe"
+        )
+    )
+    rows = [probed[path] for path in pending]
     return write_rows(rows, out_path, VIDEO_ARROW_SCHEMA, append=resume)
 
 
@@ -188,9 +200,17 @@ def main() -> None:
         default=None,
         help="probe at most this many new videos, for a trial slice",
     )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        help="worker processes; defaults to one fewer than the core count",
+    )
     args = parser.parse_args()
 
-    count = probe_directory(args.source, args.out, args.resume, args.limit)
+    count = probe_directory(
+        args.source, args.out, args.resume, args.limit, args.workers
+    )
     print(f"videos.parquet now holds {count} videos: {args.out}")
 
 
