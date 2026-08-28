@@ -18,6 +18,15 @@ class FeatureProfile:
     # images rather than a processor's tensors.
     api: str = "hf"
     trust_remote_code: bool = False
+    # How many tokens the text tower accepts. Anything past this is dropped by
+    # `truncation=True` with no exception and no log, and the result still
+    # looks like a normal ranking — which is why the number belongs here,
+    # where a query rewriter can read it, rather than in a rewriter's head.
+    #
+    # Count tokens, not words. SigLIP2's multilingual tokenizer splits an
+    # accented Vietnamese word into two or three tokens, so a 40-word rewrite
+    # can overrun 64 while a 40-word English one does not.
+    max_text_tokens: int = 64
 
 
 # SigLIP 2 Giant is the highest-capacity retrieval profile. So400m is kept as a
@@ -38,6 +47,7 @@ FEATURE_PROFILES: dict[str, FeatureProfile] = {
         model_id="openai/clip-vit-base-patch32",
         dimension=512,
         image_batch_size=8,
+        max_text_tokens=77,
     ),
     # Multilingual, and Vietnamese is one of the 89 languages it was trained
     # on. That is the reason to try it here: SigLIP2's text tower handles
@@ -51,6 +61,9 @@ FEATURE_PROFILES: dict[str, FeatureProfile] = {
         image_batch_size=8,
         api="jina",
         trust_remote_code=True,
+        # Two orders of magnitude more room than SigLIP2's 64. A rewriter
+        # targeting this profile does not need to budget at all.
+        max_text_tokens=8192,
     ),
 }
 

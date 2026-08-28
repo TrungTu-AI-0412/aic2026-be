@@ -48,8 +48,10 @@ payload :
   keyframe_n          137          ← số thứ tự keyframe — LÀ khoá
   original_frame_id   4102         ← số frame để nộp bài — KHÔNG phải khoá
   shot_id             58
+  pts_sec             102.24       ← mốc thời gian của keyframe
+  shot_start_sec      101.6
+  shot_end_sec        104.44
   path                "…/L21_V001/137.jpg"
-  title, author, channel_id, publish_date
   ocr_text            chữ trên màn hình, EasyOCR
   ocr_text_vlm        chữ trên màn hình, VLM
   ocr_regions         toạ độ vùng chữ
@@ -58,6 +60,10 @@ payload :
   asr_text_corrected  lời nói đã thêm dấu câu
   objects             RỖNG — xem mục 6
   asr_entities        RỖNG — xem mục 6
+  title               RỖNG — xem mục 6
+  author              RỖNG — xem mục 6
+  channel_id          RỖNG — xem mục 6
+  publish_date        RỖNG — xem mục 6
 ```
 
 Ba vector sparse gộp nguồn khác nhau:
@@ -92,25 +98,30 @@ sẵn. Thiếu nó thì filter không báo lỗi, chỉ âm thầm quét toàn b
 
 ---
 
-## 4. Độ phủ — đo ở đâu, chưa đo ở đâu
+## 4. Độ phủ
 
-| Trường | Phủ | Nguồn con số |
-| --- | ---: | --- |
-| `caption_vi` | ~86,6% | ghép parquet |
-| `asr_text` | ~85,4% | ghép parquet |
-| `ocr_text` | ~80,5% | ghép parquet |
-| `ocr_text_vlm` | ~40,9% | ghép parquet |
+Đếm trực tiếp trên collection (`points/count` với `must_not: is_empty`), không
+phải suy từ parquet. Hai collection khớp nhau từng con số, tức là bước sao chép
+payload sang `jinaclip2` không mất gì.
 
-**Cảnh báo:** những con số này đo trên parquet *trước khi nạp*, cộng bộ đếm của
-bước merge. **Chưa đếm trực tiếp trong collection.** Bằng chứng gián tiếp thì
-nhất quán — merge báo 30.750 điểm cập nhật, 27.608 thêm OCR, 30.600 thêm
-caption, 0 điểm lạc; 18/20 tiêu đề lấy ngẫu nhiên truy ra đúng video — nhưng
-tin không phải là đo.
+| Trường | Điểm có | Phủ |
+| --- | ---: | ---: |
+| TỔNG | 289.881 | 100% |
+| `pts_sec` | 289.881 | 100% |
+| `caption_vi` | 281.754 | 97,2% |
+| `asr_text_corrected` | 247.818 | 85,5% |
+| `asr_text` | 247.669 | 85,4% |
+| `ocr_text` | 233.491 | 80,5% |
+| `ocr_text_vlm` | 149.360 | 51,5% |
+| `title`, `author`, `channel_id`, `publish_date` | **0** | **0%** |
+| `objects`, `asr_entities` | **0** | **0%** |
 
-Số duy nhất đo trực tiếp trên collection: **289.881 điểm, exact, status green.**
+`ocr_text_vlm` thấp vì VLM chỉ chạy trên những frame EasyOCR trả về rỗng, không
+chạy lại toàn bộ — đó là thiết kế, không phải thiếu sót.
 
-Vì sao `ocr_text_vlm` chỉ 40,9%: VLM chỉ chạy trên 30.750 frame mà EasyOCR trả
-về rỗng, không chạy lại toàn bộ. Đúng những frame đó là phần merge lấp vào.
+Ước lượng trước đây suy từ parquet là **bi quan**: đoán `caption_vi` 86,6% và
+`ocr_text_vlm` 40,9%, số thật cao hơn cả hai. Ghi lại đây để lần sau đừng báo
+cáo con số suy diễn như thể đã đo.
 
 ---
 
@@ -134,10 +145,12 @@ timestamp gần nhất **trong đúng shot đó**. 89,4% frame đích tìm đư�
 
 ## 6. Lỗ đã biết
 
-**`objects` và `asr_entities` có index nhưng payload rỗng.** Chúng bị loại khỏi
-`CARRIED` của `join_server_frames.py` và chưa ghép lại. Hệ quả: filter theo vật
-thể hoặc theo tên riêng trả về rỗng — không lỗi, chỉ là không có gì. Sửa mất
-khoảng 10 giây ghép cộng một lượt ghi Qdrant.
+**Sáu trường có index nhưng payload rỗng.** `objects` và `asr_entities` bị loại
+khỏi `CARRIED` của `join_server_frames.py`. `title`, `author`, `channel_id`,
+`publish_date` thì chưa bao giờ được ghép vào. Hệ quả: **bốn hướng lọc không
+hướng nào chạy** — theo vật thể, theo tên riêng, theo kênh, theo ngày đăng. Đều
+trả về rỗng, không lỗi, chỉ là không có gì. Sửa mất khoảng 10 giây ghép cộng
+một lượt ghi Qdrant.
 
 **Không có ngưỡng khớp yếu.** Truy vấn `Nguyen Xuan Son` trả về `CHÙA HỮU SƠN`
 vì trúng mỗi chữ "sơn", và điểm số không hề báo đó là khớp rác. Cần một ngưỡng
@@ -154,13 +167,39 @@ lẫn index dense. Cần một bộ eval viết từ chữ trên màn hình.
 `FEATURE_PROFILE` trong `.env` **phải** khớp profile mà collection đang hoạt
 động được nạp — cùng model, cùng số chiều, cùng không gian.
 
-| Collection | `FEATURE_PROFILE` |
-| --- | --- |
-| `aic2-frames-v1` | `siglip2-giant-opt-patch16-384-v1` |
-| `aic2-frames-jinaclip2` | `jina-clip-v2` |
+| Collection | `FEATURE_PROFILE` | Giới hạn token của tháp text |
+| --- | --- | ---: |
+| `aic2-frames-v1` | `siglip2-giant-opt-patch16-384-v1` | **64** |
+| `aic2-frames-jinaclip2` | `jina-clip-v2` | 8192 |
 
 Đặt sai thì không sập ngay — truy vấn vẫn chạy nếu số chiều tình cờ khớp, và
 trả về rác.
+
+### Giới hạn token, và vì sao nó quan trọng với query rewriting
+
+`embed_text` gọi processor với `truncation=True`. Query dài quá giới hạn bị cắt
+đuôi **âm thầm**: không exception, không lỗi, và kết quả trả về vẫn là một bảng
+xếp hạng trông hoàn toàn bình thường, chỉ là tính từ phần đầu câu.
+
+Với `aic2-frames-v1` thì trần là **64 token**, rất chật. Module rewriting nào
+sinh câu dài hơn thế đang ném đi phần đuôi — mà rewriting hay đẩy chi tiết phân
+biệt xuống cuối, tức mất đúng phần đáng giá nhất.
+
+**Đếm token, đừng đếm từ.** Tokenizer đa ngữ của SigLIP2 cắt một từ tiếng Việt
+có dấu thành hai đến ba token. Một câu 40 từ tiếng Việt vượt 64 token dễ như
+không, trong khi 40 từ tiếng Anh thì không. Cap theo số từ là đoán.
+
+Con số nằm ở `FeatureProfile.max_text_tokens` để đọc bằng code thay vì chép tay:
+
+```python
+get_profile(settings.feature_profile).max_text_tokens
+```
+
+Với `jina-clip-v2` trần là 8192 — rewriting không cần dè chừng gì cả.
+
+`embed_text` giờ ghi log `WARNING` kèm số token bị mất khi có cắt. Cố ý **không**
+raise: một query bị cắt vẫn cho kết quả dùng được, làm hỏng hẳn truy vấn giữa
+giờ thi thì tệ hơn. Nó chỉ cần thôi vô hình.
 
 ---
 
