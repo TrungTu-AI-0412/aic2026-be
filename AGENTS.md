@@ -729,14 +729,23 @@ alone was 2.76s.
 
 The two forms, because the two collections want opposite things:
 
-- `vision` — an English **caption** of what is on screen, capped at 40 words. This is what `encode_query` and the BLIP reranker get. Deliberately
+- `vision` — an English **caption** of what is on screen, capped at a word
+  count **derived from the active feature profile**. This is what `encode_query`
+  and the BLIP reranker get. Deliberately
   not a translation, for two reasons: both models are English-centric and would
-  otherwise score "hãy tìm trong video" as part of the scene, and the SigLIP2
-  text tower reads exactly **64 tokens** (`padding="max_length"`,
+  otherwise score "hãy tìm trong video" as part of the scene, and the image text
+  tower reads a fixed number of tokens (`padding="max_length"`,
   `truncation=True` in `features/multimodal.embed_text`). A literal translation
   of a 700-character KIS description runs well past that and is cut without a
-  word of warning, losing the tail where the distinguishing detail sits. 40 words
-  (~50 tokens) is the budget matched to that window. Capping it lower is not
+  word of warning, losing the tail where the distinguishing detail sits.
+
+  `rewrite.caption_word_cap` reads `FeatureProfile.max_text_tokens` and converts
+  at the ratio the shipped pairing encodes — 40 words for SigLIP2's 64 tokens —
+  then clamps to `[MIN_CAPTION_WORDS, MAX_CAPTION_WORDS]`. SigLIP2 keeps exactly
+  the 40-word prompt it was tuned on; Jina CLIP v2's 8192-token tower is no
+  longer throttled to a window it does not have. An unrecognised profile falls
+  back to 40 rather than raising, because a rewrite is an improvement and never
+  a dependency. `decompose.event_caption_prompt` derives the same way. Capping it lower is not
   free: at 20 words the model dropped the clothing, the setting and the *camera
   angle*, which is visible and highly discriminative. The prompt keeps a stated
   shot type and is told never to invent one - instructed to keep the angle, it

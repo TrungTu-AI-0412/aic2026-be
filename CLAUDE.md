@@ -131,15 +131,25 @@ and the model variously deleted the subject of the query (`lễ hội đèn lồ
 `4 phi hành gia mặc áo đen`) or deleted nothing at all. Split, each call does
 its own job, and the wall clock is the slower of the two rather than their sum.
 
-- `Rewrite.vision` — an English **caption**, at most 40 words, for the SigLIP2
-  text tower and the BLIP reranker. Not a translation: they would score "hãy tìm
-  trong video" as part of the scene, and the text tower reads exactly **64
-  tokens** (~45 English words), so a literal translation of a 700-character KIS
-  description is silently cut in half — losing the tail, which is where the
-  distinguishing detail usually sits. 40 words is the budget matched to that
-  window; capping it lower threw away detail that discriminates, including the
-  camera angle, which *is* visible. The prompt keeps a stated shot type
-  (overhead, head-on, close-up) and is told never to invent one.
+- `Rewrite.vision` — an English **caption** for the image text tower and the
+  BLIP reranker. Not a translation: they would score "hãy tìm trong video" as
+  part of the scene, and the tower truncates in silence, so a literal
+  translation of a 700-character KIS description is cut in half — losing the
+  tail, which is where the distinguishing detail usually sits. Capping it lower
+  than the window threw away detail that discriminates, including the camera
+  angle, which *is* visible. The prompt keeps a stated shot type (overhead,
+  head-on, close-up) and is told never to invent one.
+
+  The cap is **derived from the active profile**, not written into the prompt.
+  `caption_word_cap` reads `FeatureProfile.max_text_tokens` and converts at the
+  ratio the shipped pairing encodes (40 words for SigLIP2's 64 tokens), then
+  clamps to `[MIN_CAPTION_WORDS, MAX_CAPTION_WORDS]`. SigLIP2 therefore still
+  gets exactly the 40-word prompt it was tuned on, byte for byte, while Jina
+  CLIP v2's 8192-token tower stops being held to a window it does not have. An
+  unrecognised profile falls back to 40 rather than raising — a rewrite is an
+  improvement, never a dependency, and no live search should fail over a
+  profile name. `decompose.event_caption_prompt` derives the same way, since a
+  decomposed event goes through the same tower.
 - `Rewrite.speech` — the query in its original language with the narration
   phrases **deleted**, for the transcripts. Not translated, because they are
   Vietnamese and are matched by term overlap as well as densely, so English

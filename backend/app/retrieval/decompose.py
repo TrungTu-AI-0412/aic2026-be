@@ -57,7 +57,15 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING
 
-from app.retrieval.rewrite import CLEAN_PROMPT, _attempt, _call, _clean_budget
+from app.retrieval.rewrite import (
+    CLEAN_PROMPT,
+    DEFAULT_CAPTION_WORDS,
+    TOKENS_PER_CAPTION_WORD,
+    _attempt,
+    _call,
+    _clean_budget,
+    caption_word_cap,
+)
 from app.schemas.search import DecomposeResponse, QueryForms
 
 if TYPE_CHECKING:  # pragma: no cover - import cycle: engine imports rewrite
@@ -95,7 +103,14 @@ def _decompose_prompt(max_events: int) -> str:
     )
 
 
-EVENT_CAPTION_PROMPT = (
+def event_caption_prompt(word_cap: int = DEFAULT_CAPTION_WORDS) -> str:
+    """The same cap `rewrite.caption_prompt` uses, for the same reason.
+
+    An event is searched alone against single frames through the same text
+    tower, so it has the same window to fit into. Hard-coding 40 here would
+    quietly re-impose SigLIP2's budget on a profile that does not share it.
+    """
+    return (
     "You turn the parts of a decomposed video-search query into captions for an"
     " image search over single frames.\n"
     "Line 1 is the overview of the whole scene. Every later line is one moment"
@@ -103,7 +118,7 @@ EVENT_CAPTION_PROMPT = (
     " so carry the scene's lasting visual detail into every caption: the"
     " subjects, how many, their colours and clothing, the objects, the setting."
     " The moment's own action stays the subject of its caption.\n"
-    "English, AT MOST 40 words per line - count them, a longer caption is cut"
+    f"English, AT MOST {word_cap} words per line - count them, a longer caption is cut"
     " off and wasted. Spend those words on what a camera records: the camera"
     " angle or shot type when the input states one (overhead, top-down,"
     " head-on, close-up, wide), how many of each thing, colours, clothing,"
@@ -116,7 +131,10 @@ EVENT_CAPTION_PROMPT = (
     " lines.\n"
     "Output one line per input: the same number, a period, a space, then the"
     " caption. Nothing else."
-)
+    )
+
+
+EVENT_CAPTION_PROMPT = event_caption_prompt()
 
 # `E1:`, `e 2.`, at the start of the query or after any whitespace. Anchored on
 # whitespace rather than on line starts because a task pasted out of a PDF
@@ -252,10 +270,11 @@ def _captions(
 
     started = time.perf_counter()
     try:
+        word_cap = caption_word_cap(config)
         return _call(
-            EVENT_CAPTION_PROMPT,
+            event_caption_prompt(word_cap),
             tuple(parts),
-            64 * len(parts) + 64,
+            int(word_cap * TOKENS_PER_CAPTION_WORD) * len(parts) + 64,
             len(parts),
             config.rewrite_base_url,
             config.rewrite_model,
