@@ -23,6 +23,23 @@ class FeatureProfile:
     # dimension alone does not distinguish them, so entities that index frames
     # and entities that index speech each require their own kind.
     kind: str = "image"
+    # Which encoder API the weights expose. "hf" is the CLIP-style pair of
+    # `get_text_features` / `get_image_features` that every model here used
+    # until Jina; "jina" is that model's own `encode_text` / `encode_image`,
+    # which arrive through `trust_remote_code` and take raw text and PIL
+    # images rather than a processor's tensors.
+    api: str = "hf"
+    trust_remote_code: bool = False
+    # How many tokens the text tower accepts. Anything past this is dropped by
+    # `truncation=True` with no exception and no log, and the result still
+    # looks like a normal ranking — which is why the number belongs here,
+    # where `retrieval/rewrite.py` can read it, rather than hard-coded in a
+    # prompt string that no longer matches when the profile changes.
+    #
+    # Count tokens, not words. SigLIP2's multilingual tokenizer splits an
+    # accented Vietnamese word into two or three tokens, so a 40-word rewrite
+    # can overrun 64 while a 40-word English one does not.
+    max_text_tokens: int = 64
 
 
 # SigLIP 2 Giant is the highest-capacity retrieval profile. So400m is kept as a
@@ -41,9 +58,26 @@ FEATURE_PROFILES: dict[str, FeatureProfile] = {
         dimension=1152,
     ),
     "clip-b32-v1": FeatureProfile(
+        max_text_tokens=77,
         model_id="openai/clip-vit-base-patch32",
         dimension=512,
         image_batch_size=8,
+    ),
+    # Multilingual, and Vietnamese is one of the 89 languages it was trained
+    # on. That is the reason to try it here: SigLIP2's text tower handles
+    # Vietnamese poorly enough that a query typed without diacritics — which
+    # is how people actually type — returned a turtle for "sạt lở bờ sông".
+    # Whether it beats SigLIP2 on this corpus is unmeasured; it is ingested
+    # into its own collection so the two can be compared rather than swapped.
+    "jina-clip-v2": FeatureProfile(
+        model_id="jinaai/jina-clip-v2",
+        dimension=1024,
+        image_batch_size=8,
+        api="jina",
+        trust_remote_code=True,
+        # Two orders of magnitude more room than SigLIP2's 64. A rewriter
+        # targeting this profile does not need to budget at all.
+        max_text_tokens=8192,
     ),
     # Multilingual text retrieval for ASR segments. Qwen3-Embedding pools the
     # last token rather than the mean (`1_Pooling/config.json` sets

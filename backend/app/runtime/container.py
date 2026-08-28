@@ -37,6 +37,8 @@ async def build_container(settings: Settings) -> Container:
                 # These three were previously left at their dataclass defaults,
                 # which silently made the matching settings dead.
                 hybrid_enabled=settings.HYBRID_ENABLED,
+                ocr_boost_enabled=settings.OCR_BOOST_ENABLED,
+                ocr_boost_weight=settings.OCR_BOOST_WEIGHT,
                 sparse_method=settings.SPARSE_METHOD,
                 splade_model=settings.SPLADE_MODEL,
                 asr_collection=settings.QDRANT_ASR_COLLECTION,

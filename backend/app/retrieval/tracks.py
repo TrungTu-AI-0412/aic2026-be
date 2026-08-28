@@ -10,6 +10,7 @@ from dataclasses import dataclass, replace
 from uuid import uuid4
 
 from app.retrieval.engine import (
+    retrieve_by_ocr,
     RetrievalConfig,
     Timings,
     retrieve,
@@ -19,6 +20,7 @@ from app.retrieval.engine import (
 )
 from app.retrieval.rewrite import Rewrite, rewrite_queries
 from app.schemas.search import (
+    OcrSearchRequest,
     EventCandidate,
     EventHit,
     AsrEvidence,
@@ -146,6 +148,38 @@ def _frame_search(
         for rank, hit in enumerate(hits, start=1)
     ]
     return _response(task, results, config, timings, rewritten, effective_mode)
+
+
+def search_ocr(
+    request: OcrSearchRequest, config: RetrievalConfig
+) -> SearchResponse:
+    """On-screen text, searched as itself.
+
+    No rewriting stage: the operator typed what they read off the screen, and
+    a rewriter's job is turning prose into a caption, which would corrupt the
+    one signal this searches. So `rewritten` stays None and the response
+    reports no rewritten or cleaned queries.
+
+    Every row carries `ocr_text`, both recognisers' readings joined. A lexical
+    rank alone does not tell an operator whether the match was a chyron or a
+    subtitle, and that is the difference between a submission and a wasted
+    guess.
+    """
+    timings = Timings()
+    hits = retrieve_by_ocr(
+        request.text, request.top_k, config, timings, request.video_ids
+    )
+    results = [
+        SearchResult(
+            rank=rank,
+            video_id=hit.video_id,
+            frame_ids=[hit.representative_frame],
+            score=hit.score,
+            ocr_text=hit.ocr_text,
+        )
+        for rank, hit in enumerate(hits, start=1)
+    ]
+    return _response("ocr", results, config, timings, effective_mode="visual")
 
 
 def search_trake(request: TrakeSearchRequest, config: RetrievalConfig) -> SearchResponse:

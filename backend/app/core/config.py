@@ -45,6 +45,13 @@ class Settings(BaseSettings):
     # a Vietnamese SPLADE model is cached, since the default one is
     # English-only and its subword ids are incompatible with the CRC32 slots.
     HYBRID_ENABLED: bool = True
+    # On-screen text folded over the visual ranking as a second, rank-fused
+    # query. Off by default: it costs one extra sparse query per `retrieve()`,
+    # which on TRAKE is per event.
+    OCR_BOOST_ENABLED: bool = False
+    # Measured, not chosen. This shipped at 0.5 and was worse than turning the
+    # channel off; every step down bought accuracy. See `ranking/boost.py`.
+    OCR_BOOST_WEIGHT: float = 0.05
     SPARSE_METHOD: str = "bm25"
     SPLADE_MODEL: str = "naver/splade-cocondenser-ensembledistil"
 

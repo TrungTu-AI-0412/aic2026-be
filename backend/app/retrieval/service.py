@@ -12,6 +12,7 @@ from app.schemas.search import (
     DecomposeRequest,
     DecomposeResponse,
     KisSearchRequest,
+    OcrSearchRequest,
     QaSearchRequest,
     SearchResponse,
     TrakeSearchRequest,
@@ -64,6 +65,17 @@ class QdrantSearchService:
     async def search_trake(self, request: TrakeSearchRequest) -> SearchResponse:
         return await run_in_threadpool(
             tracks.search_trake, request, self._resolve(request)
+        )
+
+    async def search_ocr(self, request: OcrSearchRequest) -> SearchResponse:
+        """The lexical channel alone. Takes no ASR overrides, so no `_resolve`.
+
+        `OcrSearchRequest` does not inherit `AsrOverrides`: the speech-overlap
+        bonus has nothing to contribute to a search that never touches the
+        speech collection, and offering the dials would imply otherwise.
+        """
+        return await run_in_threadpool(
+            tracks.search_ocr, request, self._config
         )
 
     async def decompose(self, request: DecomposeRequest) -> DecomposeResponse:

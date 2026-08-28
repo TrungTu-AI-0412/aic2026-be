@@ -1282,6 +1282,11 @@ Processes are also faster in the measured workload:
 - Parquet manifests remain the rebuild and audit source of truth.
 - `docs/data-pipeline.md` documents current data state, column provenance, and
   missing artifacts.
+- `docs/collections.md` describes the *loaded* collections — vector slots,
+  payload, measured coverage, and which `FEATURE_PROFILE` each one needs. It
+  also records the text tower's token budget per profile, which is what query
+  rewriting has to respect: SigLIP2 reads 64 tokens and truncates the rest in
+  silence, Jina CLIP v2 reads 8192.
 - Manifest paths must remain constrained to `INGESTION_DATA_ROOT`.
 
 ---
