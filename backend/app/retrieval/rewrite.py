@@ -5,13 +5,20 @@ itself - "đoạn video mô tả...", "tìm phân cảnh với...", question for
 Retrieval then searches two collections that want opposite things from that
 string, so each query is prepared twice:
 
-- keyframe images, through the SigLIP2 text tower and the BLIP ITM reranker.
+- keyframe images, through the image text tower and the BLIP ITM reranker.
   Both are English-centric and score the narration as if it described the scene,
-  and the text tower reads exactly **64 tokens** (`padding="max_length"` in
-  `features.multimodal.embed_text`) - about 45 English words. A literal
-  translation of a 700-character KIS description runs well past that and is cut
-  without warning, losing the tail where the distinguishing detail sits. So this
-  side gets a short English *caption*.
+  and the tower reads a fixed number of tokens - SigLIP2 exactly **64**, about
+  45 English words. A literal translation of a 700-character KIS description
+  runs well past that and is cut without warning by `truncation=True` in
+  `features.multimodal.embed_text`, losing the tail where the distinguishing
+  detail sits. So this side gets a short English *caption*.
+
+  The word cap is **derived from the active profile**, not fixed. It was 40 in
+  a prompt string, which is right for SigLIP2 and wrong for anything else:
+  Jina CLIP v2's tower reads 8192 tokens, and holding a caption to 40 words
+  there throws away detail the encoder would have read. `FeatureProfile.
+  max_text_tokens` carries the budget and `caption_word_cap` turns it into a
+  number the prompt can state.
 - speech transcripts, which are Vietnamese and are matched dense *and* by term
   overlap, so translating for them would drop the lexical half to nothing -
   while leaving the narration in place makes `đoạn video`, `phân cảnh`, `tìm`
@@ -46,6 +53,8 @@ from typing import TYPE_CHECKING
 
 import httpx
 
+from app.features.profiles import get_profile
+
 if TYPE_CHECKING:  # pragma: no cover - import cycle: engine imports this module
     from app.retrieval.engine import RetrievalConfig, Timings
 
@@ -58,11 +67,41 @@ class Rewrite:
     speech: str  # Original language, narration deleted: Vietnamese transcripts
 
 
-CAPTION_PROMPT = (
+# What one English word costs the image tower, taken from the pairing this
+# shipped with: 40 words was judged the right cap for SigLIP2's 64 tokens.
+WORDS_PER_TOKEN = 40 / 64
+# Below this a caption stops being able to name what is in the frame; above it
+# a caption stops being a caption. Both are judgement, not measurement - the
+# ceiling exists because 8192 tokens would otherwise derive a 5120-word cap,
+# which is not a number worth putting in a prompt.
+MIN_CAPTION_WORDS = 20
+MAX_CAPTION_WORDS = 120
+# The cap for a 64-token tower. `CAPTION_PROMPT` below is `caption_prompt` at
+# this value, so a SigLIP2 deployment produces exactly the prompt it always did.
+DEFAULT_CAPTION_WORDS = 40
+
+
+def caption_word_cap(config: "RetrievalConfig") -> int:
+    """How long a caption the active image profile can actually read.
+
+    An unknown profile falls back to the SigLIP2 cap rather than raising. A
+    rewriting step is an improvement, never a dependency, and refusing to
+    rewrite because a profile name is unrecognised would take the whole query
+    path down over a caption.
+    """
+    try:
+        tokens = get_profile(config.feature_profile).max_text_tokens
+    except Exception:
+        return DEFAULT_CAPTION_WORDS
+    return max(MIN_CAPTION_WORDS, min(MAX_CAPTION_WORDS, int(tokens * WORDS_PER_TOKEN)))
+
+
+def caption_prompt(word_cap: int = DEFAULT_CAPTION_WORDS) -> str:
+    return (
     "You turn a video-search query into a caption for an image search over"
     " single frames. The query is an operator's description of a moment they"
     " want to find, wrapped in narration about the video or the search itself.\n"
-    "English, AT MOST 40 words - count them, a longer caption is cut off and"
+    f"English, AT MOST {word_cap} words - count them, a longer caption is cut off and"
     " wasted. Spend those words on what a camera records: the camera angle or"
     " shot type when the query states one (overhead, top-down, head-on,"
     " close-up, wide), how many of each thing, colours, clothing, objects, where"
@@ -73,7 +112,10 @@ CAPTION_PROMPT = (
     " search itself. Never merge or split queries.\n"
     "Output one line per input: the same number, a period, a space, then the"
     " caption. Nothing else."
-)
+    )
+
+
+CAPTION_PROMPT = caption_prompt()
 
 CLEAN_PROMPT = (
     "You strip search-narration out of a video-search query. The result is fed"
@@ -128,12 +170,13 @@ def rewrite_queries(
         # Both calls at once: the caption is short and the cleaned form is nearly
         # as long as the query, so run sequentially this would cost the sum of
         # the two rather than the slower one.
+        word_cap = caption_word_cap(config)
         with ThreadPoolExecutor(max_workers=2) as pool:
             pending = [
-                pool.submit(_attempt, prompt, batch, config, budget(batch))
+                pool.submit(_attempt, prompt, batch, config, budget)
                 for prompt, budget in (
-                    (CAPTION_PROMPT, _caption_budget),
-                    (CLEAN_PROMPT, _clean_budget),
+                    (caption_prompt(word_cap), _caption_budget(batch, word_cap)),
+                    (CLEAN_PROMPT, _clean_budget(batch)),
                 )
             ]
             captions, cleaned = (task.result() for task in pending)
@@ -150,9 +193,20 @@ def rewrite_queries(
         timings.record("rewrite", started)
 
 
-def _caption_budget(texts: tuple[str, ...]) -> int:
-    """Room for a 40-word caption per query, whatever the query's length."""
-    return 64 * len(texts) + 64
+# Output tokens one English caption word costs, from the same shipped pairing:
+# 64 tokens of room for a 40-word caption.
+TOKENS_PER_CAPTION_WORD = 64 / 40
+
+
+def _caption_budget(texts: tuple[str, ...], word_cap: int = DEFAULT_CAPTION_WORDS) -> int:
+    """Room for one capped caption per query, whatever the query's length.
+
+    Sized from the cap rather than from the input, which is the whole point of
+    capping: a 700-character query and a 30-character one get the same caption
+    budget because both produce a caption of at most `word_cap` words.
+    """
+    per_line = int(word_cap * TOKENS_PER_CAPTION_WORD)
+    return per_line * len(texts) + 64
 
 
 def _clean_budget(texts: tuple[str, ...]) -> int:
