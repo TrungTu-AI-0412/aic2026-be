@@ -1,0 +1,30 @@
+flowchart TD
+    REQ["POST /search/trake\noverview, events[], top_k,\nvideo_ids?, max_gap_sec?"]
+    RW["rewrite_queries([overview, *events])\n2 concurrent prompts, 1 batch"]
+    REQ --> RW
+    RW -->|"vision: EN caption ≤40w\nspeech: VI, narration deleted"| BR{"video_ids given?"}
+
+    BR -->|yes| VID["use them verbatiVITE_API_BASE_URL=http://20.0.13.252:8000/api/v1m\n(dedup, order kept)"]
+    BR -->|no| A
+
+    subgraph A["STAGE A — choose videos (global)"]
+        A1["retrieve_video_scores(overview, 1000)"]
+        A2["retrieve_video_scores(event_i, 1000)\nfor every event"]
+        A3["score(video) =\nbest_overview + mean_i(best_event_i)"]
+        A1 --> A3
+        A2 --> A3
+        A3 --> A4["top 100 videos"]
+    end
+
+    VID --> B
+    A4 --> B
+
+    subgraph B["STAGE B — localise (per video)"]
+        B1["for each event:\nretrieve_per_video(event, videos, 20)\n= one filtered query PER (video, event)"]
+        B1 --> B2["slots[video][event] = 20 candidates\nshots NOT collapsed, rerank OFF"]
+    end
+
+    B2 --> C["_best_increasing_sequence\nDP per video"]
+    C --> D["drop videos with an empty slot\nor no valid ordering"]
+    D --> E["sort by sequence score,\ncut to top_k"]
+    E --> F["SearchResult per video:\nframe_ids[] + events[] with alternates"]
