@@ -21,3 +21,4 @@ id_rsa*
 # VPN profiles: these embed a CA, a client certificate and a client private
 # key inline. tung.ovpn was staged by a wildcard add during a merge.
 *.ovpn
+*.tar.gz
