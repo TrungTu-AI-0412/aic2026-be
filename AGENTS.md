@@ -83,6 +83,18 @@ Important implications:
 - Do not return `shot_id`, keyframe ordinal, Qdrant point id, PTS, or ASR segment
   id as the competition frame id.
 
+**Temporal KIS.** A KIS description that walks through phases ("phân cảnh tiếp
+theo...", "sau đó...") is one target reached through a sequence, and averaging
+those phases into a single 40-word caption is what loses it. Given `overview` +
+`events` (from `/search/decompose`, reviewed by the operator), `/search/kis`
+runs the TRAKE two-stage path so each moment votes on the video independently,
+and still reports **one** frame: the highest-scoring event of the aligned chain.
+Not the overview's frame - "cảnh trang trí bánh rán" exists to select the video,
+not the frame - and this is safe precisely because of the correctness condition
+above: the chain is compact and in order inside one video, so every event frame
+is inside the accepted interval. The whole chain rides along in `events[]` for a
+one-click override. The operator opts in; nothing is auto-detected.
+
 ---
 
 ### 2. VQA / Q&A — Retrieval first, answer second
@@ -661,6 +673,38 @@ task-specific shaping
 
 Current shared stages are:
 
+### 0a. Query decomposition (optional, operator-driven)
+
+```text
+POST /search/decompose  (decompose.py)
+  markers "E1:/E2:" -> split_markers (regex)   ->| CLEAN_PROMPT        |concurrent
+                                                 | EVENT_CAPTION_PROMPT|
+  prose             -> _decompose_prompt(N) -> EVENT_CAPTION_PROMPT   (serial)
+  -> {overview, events[]} each as {original, vision, speech}
+  -> operator reviews and edits, then posts them to /search/trake or /search/kis
+```
+
+Only runs when the operator asks for it, and **retrieval does not run here**. A
+wrong decomposition costs the whole task, so it is reviewed before it is
+searched; the search endpoints then accept those `{vision, speech}` objects and
+make no LLM call at all, which is what keeps the operator's edit from being
+re-captioned away.
+
+Events are counted by **marker line**, never by the number inside the marker:
+`data/evaluation_set_p1.csv` contains a TRAKE task the organiser numbered
+`E1, E2, E2, E4`, which has four events. Prose is capped at
+`MAX_DECOMPOSED_EVENTS` (6); over the cap raises rather than truncating, because
+the tail of these descriptions carries the distinguishing detail. Both paths end
+at `EVENT_CAPTION_PROMPT`, which sees the overview on line 1 and carries the
+scene's lasting visual detail into every event caption - an event is searched
+alone against single frames, and "khoảnh khắc 4 chân hoàn toàn chạm đất" alone
+describes nothing.
+
+Failure is deliberately not uniform: no decomposition is a **503** (it is the
+entire product of the call), while a failed caption is a 200 with `vision: null`
+and a failed `CLEAN_PROMPT` leaves the marker text as typed. Full rationale in
+`docs/trake-retrieval.md` §11.
+
 ### 0. Query rewriting
 
 ```text
@@ -900,8 +944,11 @@ return complete sequence candidates
 
 The implementation now follows that hierarchy. `tracks._candidate_videos`
 searches the overview *and* every event globally and keeps the top
-`TRAKE_VIDEO_CANDIDATES` videos, scored as `best overview hit + mean of best
-per-event hits`. Coverage is deliberately not required at that stage: demanding
+`min(TRAKE_VIDEO_CANDIDATES, top_k)` videos - a result needs a candidate video to
+live in, and stage B pays `videos x events` serial round trips for every extra
+one - scored as `best overview hit + mean of best per-event hits`. That score and
+the parts it is made of come back on every result as `SearchResult.stage_a`
+(null when `video_ids` was supplied and the stage never ran). Coverage is deliberately not required at that stage: demanding
 a global hit for every event is what dropped correct videos, since a
 fine-grained event does not reach a global top-N against 290k frames. That stage reads
 `engine.retrieve_video_scores`, not `retrieve`: collapsing per shot and cutting
@@ -1290,8 +1337,13 @@ sync when either file contains rules intended for all coding agents.
   exists so an operator closes that gap by hand. The VLM endpoint in `.env` is
   now read, but only to rewrite queries; asking it *where* an event is inside a
   bracketed shot is the obvious next lever.
-- No TRAKE eval set exists (`data/eval_set.jsonl` is absent), so retrieval
-  changes to it are checked by unit tests and by eye, not measured.
+- Nothing in TRAKE is fitted. `data/evaluation_set_p1.csv` (24 queries: 18 KIS,
+  3 TRAKE with frame-level ground truth, 3 QA) has never been run against this
+  path, so stage A's `overview + mean(events)`, `TRAKE_MAX_GAP_SEC` and
+  `TRAKE_GAP_WEIGHT` are reasoned from the score scale rather than measured -
+  and decomposition now feeds them inferred events and synthesised overviews,
+  which is a different input distribution. `data/eval_set.jsonl` is a separate,
+  ASR-derived set and is absent.
 - `docs/architecture.md` is empty.
 - Automated VQA answer generation is not implemented.
 - Exact TRAKE semantic-boundary refinement beyond coarse retrieved frames

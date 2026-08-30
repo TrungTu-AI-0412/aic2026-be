@@ -4,6 +4,61 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 RetrievalMode = Literal["visual", "visual_asr", "asr_only"]
 
+# Events a prose query may be decomposed into. A cap because stage B is
+# `videos x events` serial round trips, so an over-eager decomposition is paid
+# for on every search that follows it. Explicit `E1:`-style queries are not
+# capped: the competition decides how many moments its own task has.
+MAX_DECOMPOSED_EVENTS = 6
+
+
+class QueryForms(BaseModel):
+    """One part of a decomposed query, in the forms retrieval needs.
+
+    Produced by `POST /search/decompose` and accepted back by the search
+    endpoints, so an operator edits what the model wrote and the search uses it
+    verbatim - a search given these does no LLM work at all.
+
+    `original` is the span of the operator's query this was cut from, and is
+    null for an overview the model synthesised (the query never stated one).
+    `vision` is null when the caption call failed: retrieval then puts `speech`
+    through the image tower, which ranks worse than a caption but is not
+    nothing.
+    """
+
+    original: str | None = None
+    vision: str | None = None
+    speech: str = Field(min_length=1)
+
+
+class DecomposeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    query: str = Field(min_length=1)
+    max_events: int = Field(
+        default=MAX_DECOMPOSED_EVENTS,
+        ge=1,
+        le=12,
+        description=(
+            "Cap on events for a query that does not enumerate its own. Ignored"
+            " when the query carries explicit `E1:` markers - those are split"
+            " deterministically and the competition's own count is kept."
+        ),
+    )
+
+
+class DecomposeResponse(BaseModel):
+    """What the operator reviews before searching.
+
+    `source` says how the split happened: `markers` when the query enumerated
+    its events (a regex, no model, so it cannot renumber or merge them) and
+    `llm` when they were inferred from prose.
+    """
+
+    source: Literal["markers", "llm"]
+    overview: QueryForms
+    events: list[QueryForms]
+    latency_ms: dict[str, float] = Field(default_factory=dict)
+
 
 class AsrOverrides(BaseModel):
     """Per-request overrides for the speech-overlap bonus.
@@ -72,10 +127,75 @@ class FrameSearchOverrides(AsrOverrides):
         return self
 
 
-class KisSearchRequest(FrameSearchOverrides):
+class TemporalOverrides(BaseModel):
+    """Shape of the sequence a temporal search will accept.
+
+    Shared by TRAKE and by a KIS query the operator chose to search
+    temporally: both run the same two-stage pipeline, so both want the same
+    dials on the chain it builds.
+    """
+
+    max_gap_sec: float | None = Field(
+        default=None,
+        ge=0.0,
+        description=(
+            "Widest gap in seconds between consecutive events. 0 disables the"
+            " check; None uses the configured default."
+        ),
+    )
+    gap_weight: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "What the time gap between consecutive events costs, as a share of"
+            " the sequence score - the events of one query describe a single"
+            " continuous action, so a tighter chain is the better answer. 0"
+            " disables the penalty; None uses the configured default."
+        ),
+    )
+
+
+class KisSearchRequest(FrameSearchOverrides, TemporalOverrides):
+    """One frame per row, found either directly or through a sequence.
+
+    `overview` and `events` turn this into a *temporal* KIS: a description that
+    walks through phases ("phân cảnh tiếp theo...") is decomposed by
+    `/search/decompose`, each moment votes on the video independently, and the
+    row still reports one frame - the highest-scoring event of the aligned
+    chain. Averaging those phases into a single 40-word caption is what this
+    replaces. The operator opts in; nothing is auto-detected.
+    """
+
     task: Literal["kis"]
-    description: str = Field(min_length=1)
+    description: str = Field(
+        min_length=1,
+        description=(
+            "The query as typed. Ignored for retrieval when `events` is given,"
+            " where the decomposed forms are searched instead."
+        ),
+    )
     top_k: int = Field(default=100, ge=1, le=100)
+    overview: str | QueryForms | None = Field(
+        default=None,
+        description="Temporal KIS only. Must be given with `events`.",
+    )
+    events: list[str | QueryForms] | None = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "Temporal KIS only: the moments the description walks through, in"
+            " order. Omit for an ordinary single-frame KIS search."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _validate_temporal(self) -> "KisSearchRequest":
+        if (self.overview is None) != (self.events is None):
+            raise ValueError("overview and events must be given together")
+        if self.events is not None and self.retrieval_mode == "asr_only":
+            raise ValueError("temporal KIS has no ASR-only form")
+        return self
 
 
 class QaSearchRequest(FrameSearchOverrides):
@@ -92,12 +212,12 @@ class QaSearchRequest(FrameSearchOverrides):
     top_k: int = Field(default=100, ge=1, le=100)
 
 
-class TrakeSearchRequest(AsrOverrides):
+class TrakeSearchRequest(AsrOverrides, TemporalOverrides):
     model_config = ConfigDict(extra="forbid")
 
     task: Literal["trake"]
-    overview: str = Field(min_length=1)
-    events: list[str] = Field(min_length=1)
+    overview: str | QueryForms
+    events: list[str | QueryForms] = Field(min_length=1)
     top_k: int = Field(
         default=100,
         ge=1,
@@ -112,14 +232,6 @@ class TrakeSearchRequest(AsrOverrides):
         description=(
             "Search only these videos, skipping video selection entirely. For an"
             " operator who already found the video with a KIS query."
-        ),
-    )
-    max_gap_sec: float | None = Field(
-        default=None,
-        ge=0.0,
-        description=(
-            "Widest gap in seconds between consecutive events. 0 disables the"
-            " check; None uses the configured default."
         ),
     )
 
@@ -160,11 +272,30 @@ class AsrEvidence(BaseModel):
     score: float
 
 
+class StageAScore(BaseModel):
+    """Why the video-selection stage kept this video.
+
+    The composite alone cannot answer the question an operator actually asks -
+    did this video win on the overview and lose every event, or the reverse -
+    so the parts it is made of are reported next to it. `event_scores` is the
+    best global score each event reached in this video, 0.0 where the event
+    reached it nowhere, in request order.
+    """
+
+    rank: int
+    score: float
+    overview_score: float
+    event_scores: list[float]
+
+
 class SearchResult(BaseModel):
     rank: int
     video_id: str
     frame_ids: list[int]
     score: float
+    # Temporal tracks only, and null when `video_ids` was supplied: stage A
+    # never ran, and reporting 0.0 there would read as "matched nothing".
+    stage_a: StageAScore | None = None
     # TRAKE only, and additive: `frame_ids` keeps its meaning, so a client that
     # ignores this field is unaffected. Four bare integers cannot tell an
     # operator which event landed where in time, which is what this carries.

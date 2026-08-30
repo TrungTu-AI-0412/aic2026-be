@@ -12,3 +12,4 @@ data/*
 artifacts/
 *.npy
 *.log
+*.tar.gz

@@ -106,6 +106,23 @@ implementations and where the active collection names are injected.
 a transformer forward pass plus blocking Qdrant IO would otherwise stall the
 event loop.
 
+Ahead of the engine, an operator may first paste the task whole into
+`POST /search/decompose` (`app/retrieval/decompose.py`), which splits it into an
+overview and its events and hands both retrieval forms back **for review before
+anything is searched**: a wrong decomposition costs the whole task, and it is
+only visible next to the words it was cut from. A task that enumerates its own
+events (`E1:`, `E2:`) is split by regex, never by the model - one of the three
+TRAKE queries in `data/evaluation_set_p1.csv` is numbered `E1, E2, E2, E4`, so
+events are counted by marker line and never by the number inside it. Prose is
+split by one LLM call, capped at `MAX_DECOMPOSED_EVENTS`; over the cap is a 503,
+not a truncation, because the tail is where the distinguishing detail sits. Both
+paths end at a caption call that sees the overview on line 1, because an event
+searched alone against single frames needs the scene it belongs to. A failed
+decomposition is a **503** (it is the whole product of the call); a failed
+caption is a 200 with `vision: null`. The search endpoints then take those forms
+back verbatim and make **no LLM call at all**, so the operator's edit is what
+runs - see `docs/trake-retrieval.md` §11.
+
 Ahead of the engine, `rewrite.rewrite_queries` prepares every query of the
 request twice, because the two collections want opposite things from the same
 string. Two **separate prompts on two concurrent calls** to `VLM_BASE_URL`, not
@@ -166,12 +183,18 @@ SigLIP2, not against translating for it.
    with the cosine scores below it
 
 `tracks.py` decides only *what* to encode and how to shape results. KIS/QA return
-one frame per hit; QA leaves `answer=None` (no VQA model is wired in).
+one frame per hit; QA leaves `answer=None` (no VQA model is wired in). KIS given
+`overview` + `events` is **temporal KIS**: the two-stage TRAKE path reporting one
+frame - the highest-scoring event of the aligned chain, since KIS ground truth is
+a set of acceptable frames covering the whole action. The operator opts in;
+nothing is auto-detected.
 
 **TRAKE runs in two stages**, because "which video" and "where in it" are
 different questions. `_candidate_videos` searches the overview *and* every event
-globally and keeps the top `TRAKE_VIDEO_CANDIDATES` videos, scoring each as
-`best overview hit + mean of best per-event hits`. Coverage is deliberately not
+globally and keeps the top `min(TRAKE_VIDEO_CANDIDATES, top_k)` videos - a result
+needs a candidate to live in - scoring each as
+`best overview hit + mean of best per-event hits` and reporting that score and
+its parts back as `SearchResult.stage_a`. Coverage is deliberately not
 required here: demanding a global hit for every event is what dropped correct
 videos, since a fine-grained event ("the moment all four feet touch the ground")
 does not reach a global top-N against 290k frames. That stage reads
@@ -275,7 +298,9 @@ types.
 - Do not change API contracts silently; regenerate `docs/openapi.json` when they
   change. The frontend (`../aic2026-fe`) codegens from it and is a separate
   repository — never mix backend and frontend changes in one commit.
-- `AGENTS.md` is a copy of this file; keep the two in sync.
+- `AGENTS.md` is **not** a copy of this file - it is a longer document with its
+  own task-contract sections. Apply the same change to both; never overwrite one
+  with the other.
 
 ## Known gaps
 
@@ -290,6 +315,11 @@ types.
   an operator closes that last gap by hand. The VLM endpoint in `.env` is now
   read, but only to rewrite queries; asking it *where* an event is inside a
   bracketed shot is the obvious next lever.
-- No TRAKE eval set exists (`data/eval_set.jsonl` is absent), so retrieval
-  changes to it are checked by unit tests and by eye, not measured.
+- Nothing in TRAKE is fitted. `data/evaluation_set_p1.csv` (24 queries: 18 KIS,
+  3 TRAKE with frame-level ground truth, 3 QA) has never been run against this
+  path, so stage A's `overview + mean(events)`, `TRAKE_MAX_GAP_SEC` and
+  `TRAKE_GAP_WEIGHT` are reasoned from the score scale, not measured - and
+  decomposition now feeds them inferred events and synthesised overviews, which
+  is a different input distribution. `data/eval_set.jsonl` is a separate,
+  ASR-derived set and is absent.
 - `docs/architecture.md` is empty.
